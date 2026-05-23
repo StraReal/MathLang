@@ -153,7 +153,6 @@ class Parser:
         let_objects = []
         let_numvars = []
         for stmt in statements:
-            print(stmt)
             if stmt.type == 'let':
                 let_objects.append(stmt.objects[0])
             elif stmt.type == 'let_numvar':
