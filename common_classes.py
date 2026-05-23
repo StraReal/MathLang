@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Set, Tuple, Sequence, Any, Union
 import sys
-
+from collections.abc import Hashable
 
 @dataclass
 class OperationDefinition:

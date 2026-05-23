@@ -1,13 +1,34 @@
 type Bool
-    alias boolean
 type Int
-    alias integer
 type Str
-    alias string
 type Tuple
 type Dict
-    alias namedTuple
+type UndefinedType
+type AnyType
 
+Hypothesis:
+    let Any be AnyType
+    let Undefined be UndefinedType
+    let boolean be Type = Bool
+    let integer be Type = Int
+    let string be Type = Str
+
+@[extern str_conv]
+operation stringConvert Int -> Str
+
+@[extern str_conv]
+operation stringConvert Type -> Str
+
+operation Type into Type
+    if second equals Str
+        gives stringConvert first
+    error "Can't convert type Type into " + (stringConvert second)
+
+operation Type equals AnyType -> Bool
+    gives true
+
+operation Type != AnyType -> Bool
+    gives false
 
 operation Int <= Int -> Bool
     gives first < second or first equals second
@@ -21,7 +42,6 @@ operation isNatural Int -> Bool
 operation isEven Int -> Bool
     gives first mod 2 equals 0
     witness k be Int: first equals 2 * k
-
 
 operation fibonacci Int -> Int
     if first equals 0
@@ -73,6 +93,9 @@ operation Int < Int -> Bool
 @[extern int_div]
 operation Int div Int -> Int
 
+operation Int / Int -> Fraction
+    gives (first, second) into Fraction
+
 operation Int != Int -> Bool
     gives not (first equals second)
 
@@ -118,6 +141,10 @@ operation Str + Str -> Str
 @[extern mul]
 operation Str * Int -> Str
 
+operation Str != Str -> Str
+    gives not (first equals second)
+
+
 @[extern len]
 operation length Str -> Int
 
@@ -143,11 +170,8 @@ operation Int in Str -> Bool
 @[extern in]
 operation Str in Str -> Bool
 
-@[extern str_conv]
-operation stringConvert Int -> Str
-
-@[extern str_conv]
-operation stringConvert Type -> Str
+@[extern int_conv]
+operation integerConvert Str -> Int
 
 operation Int into Type
     if second equals Bool
@@ -157,6 +181,82 @@ operation Int into Type
     if second equals Int
         gives first
     error "Can't convert type Int into " + (stringConvert second)
+
+
+operation Str into Type
+    if second equals Bool
+        gives first != ""
+    if second equals Str
+        gives first
+    if second equals Int
+        gives integerConvert first
+    error "Can't convert type Str into " + (stringConvert second)
+
+operation Tuple into Type
+    if second equals Bool
+        gives length first != 0
+    if second equals Str
+        gives stringConvert first
+    error "Can't convert type Tuple into " + (stringConvert second)
+
+operation validFraction Tuple -> Bool
+    if not (length first) equals 2
+        gives false
+    gives ((typeOf first[0]) equals Int) and ((typeOf first[1]) equals Int)
+
+type Fraction
+    accepts Tuple
+    matches validFraction self
+
+operation Fraction into Type
+    if second equals Str
+        gives (first[0] into Str) + "/" + (first[1] into Str)
+    if second equals Int
+        if (first[0]) gcd (first[1]) equals (first[1])
+            gives first[0] div first[1]
+        else
+            error "Fraction " + (first into Str) + " can't be converted into integer"
+    error "Can't convert type Tuple into " + (stringConvert second)
+
+operation simplifyFraction Fraction -> Fraction
+    let numerator be integer = first[0]
+    let denominator be integer = first[1]
+    let g be integer = numerator gcd denominator
+    gives (numerator div g, denominator div g)
+
+operation Fraction * Fraction -> Fraction
+    let newNumerator be integer = first[0] * second[0]
+    let newDenominator be integer = first[1] * second[1]
+    let newFraction be Fraction = simplifyFraction ((newNumerator, newDenominator) into Fraction)
+    gives newFraction
+
+operation Fraction equals Int -> Bool
+    if first[0] gcd first[1] equals first[1]
+        gives (first into Int) equals second
+    else
+        gives false
+
+
+operation Fraction / Fraction -> Fraction
+    let newNumerator be integer = first[0] * second[1]
+    let newDenominator be integer = first[1] * second[0]
+    let newFraction be Fraction = simplifyFraction ((newNumerator, newDenominator) into Fraction)
+    gives newFraction
+
+@[extern print]
+operation print Int -> Undefined
+
+@[extern print]
+operation print Str -> Undefined
+
+@[extern print]
+operation print Tuple -> Undefined
+
+@[extern print]
+operation print Type -> Undefined
+
+operation print Fraction -> Undefined
+    print (first into Str)
 
 
 axiom SideSwitching:

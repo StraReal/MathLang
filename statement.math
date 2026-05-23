@@ -2,11 +2,10 @@
 import MathAxioms
 
 Hypothesis:
-    let a be Tuple = (0,2,3)
-    let s be string = "hello"
-
+    let ff be Fraction = (1, 2)
+    let sf be Fraction = (4,6)
+    let rf be Fraction = (3,1)
 Proof:
-    (1 into Bool) equals true
-    (020 into Str) equals "20"
-    (123 into Int) equals 123
-    123 into Tuple
+    print "Result: " + ((ff/sf) into Str)
+    rf equals 3
+    print typeOf rf equals 3

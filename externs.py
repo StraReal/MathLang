@@ -17,5 +17,8 @@ externs = {
     'mod':     lambda a, b: a % b,
     'len':     lambda a: len(a),
     'in':      lambda a, b: any(elem[1] == a for elem in b),
+
     'str_conv':lambda a: str(a),
+    'int_conv':lambda a: int(a),
+    'print':   lambda a: print(a),
 }

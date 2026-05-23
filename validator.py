@@ -20,17 +20,19 @@ class Validator:
         self.last_let_failed: bool = False
         self.last_axiom_failed: bool = False
         self.contradictory = False
-        self.congruence_pools: Dict[int, Set[str]] = {}  # pool_id → set of ident names
+        self.congruence_pools: Dict[int, Set[str]] = {}  # pool_id -> set of ident names
         self._next_pool_id: int = 1
         self.aliases = {}
         self.facts = defaultdict(list)
         self.call_depth = 0
-        self.max_call_depth = 1000
+        self.call_stack = []
+        self.scope_stack : List[Dict[str, [str, any]]] = [{}]
+        self.max_call_depth = 100000
         sys.setrecursionlimit((2**31)-1)
 
-        self.variables: Dict[str, [str, any]] = {}
 
-    def normalize_comparison(self, left_type, operator, right_type):
+    @staticmethod
+    def normalize_comparison(left_type, operator, right_type):
         if operator not in NON_COMMUTATIVE:
             if left_type > right_type:
                 left_type, right_type = right_type, left_type
@@ -59,6 +61,7 @@ class Validator:
                 self.operations[t] = (item.return_type, item.body, item.attributes, item.witnesses)
             elif kind == 'type':
                 self.types[item[0]] = item
+                # name of type, aliases, accepts, matches
                 for alias in item[1]:
                     self.aliases[alias] = item[0]
 
@@ -120,6 +123,13 @@ class Validator:
     def _err(self, line, msg):
         file, lineno = self.get_infile_line(line)
         return f"{file} | Line {lineno}: {msg}"
+
+    def _error(self, line, msg):
+        traceback_str = ""
+        if self.call_stack:
+            frames = "\n  ".join(self.call_stack)
+            traceback_str = f"\n  Traceback:\n  {frames}"
+        self.errors.append(self._err(line, msg + traceback_str))
 
     def get_infile_line(self, line_num):
         if line_num in self.import_map:
@@ -345,43 +355,70 @@ class Validator:
                 self._err(line, f"Unknown external function '{extern_name}'"))
             return None
 
-    def _execute_block(self, block):
+    def _execute_block(self, block, is_hypothesis=False):
         for statement in block:
             if not isinstance(statement, Statement):
                 continue
+
             if statement.type == 'gives':
-                return self.solve_expression(statement)
-            elif statement.type == 'if':
+                return self.solve_expression(statement.objects[0])
+
+            if statement.type == 'if':
                 condition, then_block, else_block = statement.objects
                 cond_result = self.solve_expression(condition)
-                chosen_block = then_block if (cond_result is not None and cond_result[1] == 'true') else else_block
-                result = self._execute_block(chosen_block)
+                chosen_block = (
+                    then_block
+                    if (cond_result is not None and cond_result[1] == 'true')
+                    else else_block
+                )
+                result = self._execute_block(chosen_block, is_hypothesis)
                 if result is not None:
                     return result
-            else:
-                self.solve_expression(statement, make_true=True)
+                continue
+
+            self.process_statement(statement, is_hypothesis)
+
+            if self.contradictory:
+                break
+
         return None
 
+    def _resolve_base_type(self, type_name):
+        """Walk the accepts chain until we hit a primitive type."""
+        seen = set()
+        while type_name in self.types:
+            if type_name in seen:
+                break  # circular, bail
+            seen.add(type_name)
+            t = self.types[type_name]
+            accepts = t[2]
+            if not accepts:
+                break
+            type_name = accepts[0]
+        return type_name
+
     def _call_op(self, op_def, bindings, witnessed=False, line=0):
+        self.call_stack.append(f"operation '{op_def[0] or 'unknown'}' (line {line})")
         self.call_depth += 1
         if self.call_depth > self.max_call_depth:
             self.call_depth = 0
             cprint(self._err(line, f"Recursion limit exceeded ({self.max_call_depth})"), 'dr')
             sys.exit(1)
-        saved = dict(self.variables)
-        self.variables.update(bindings)
-        result = None
+
+        new_frame = self.scope_stack[0] | (bindings or {})
+        self.scope_stack.append(new_frame)
+
         try:
             if witnessed and op_def[3]:
                 for witness_condition in op_def[3]:
                     if isinstance(witness_condition, tuple) and witness_condition[0] == 'inductive':
                         _, var_name, req_type, condition_expr = witness_condition
-                        assigned_value = self.variables.get('k', [None, None])
+                        assigned_value = self.scope_stack[-1].get('k', [None, None])
                         if assigned_value[0] == 'VARIABLE':
-                            if req_type != self.variables[assigned_value[1]][0]:
-                                self.errors.append(self._err(condition_expr.line, f"Given type ({self.variables[var_name][0]}) doesn't match witness required type ({req_type})."))
-                            # bind the witness value (already in bindings as 'k') and check the condition
-                            self.variables[var_name] = ['VARIABLE', assigned_value[1]]
+                            if req_type != self.scope_stack[-1][assigned_value[1]][0]:
+                                self.errors.append(self._err(condition_expr.line,
+                                                             f"Given type ({self.scope_stack[-1][var_name][0]}) doesn't match witness required type ({req_type})."))
+                            self.scope_stack[-1][var_name] = ['VARIABLE', assigned_value[1]]
                         else:
                             if req_type != assigned_value[0]:
                                 self.errors.append(self._err(condition_expr.line,
@@ -406,7 +443,10 @@ class Validator:
             else:
                 result = self._execute_block(op_def[1])
         finally:
-            self.variables = saved
+            self.call_depth -= 1
+            self.call_stack.pop()
+            self.scope_stack.pop()
+
         return result
 
     def canonicalize_expression(self, expr):
@@ -424,7 +464,7 @@ class Validator:
                               witness=expr.witness, line=expr.line)
         elif isinstance(expr, tuple):
             if expr[0] == 'VARIABLE':
-                var = self.variables.get(expr[1])
+                var = self.scope_stack[-1].get(expr[1])
                 if var is not None and var[1] is not None and not isinstance(var[1], Expression):
                     return self.canonicalize_expression((var[0], var[1]))
             return expr
@@ -437,12 +477,20 @@ class Validator:
             ex_type = expression[0]
 
             if ex_type == 'VARIABLE':
-                var = self.variables.get(val)
+                var = self.scope_stack[-1].get(val)
                 if var is not None:
                     if var[1] is not None:
                         return self.solve_expression(expression=(var[0], var[1]))
                 return 'VARIABLE', val
-
+            if ex_type == 'TUPLE':
+                fields = []
+                for field in val:
+                    field_value = self.solve_expression(field)
+                    fields.append([
+                        field_value[0] if field_value else None,
+                        field_value[1] if field_value else None
+                    ])
+                return 'Tuple', fields
             if ex_type.upper().startswith('LIT'):
                 ex_type = ex_type[3:].capitalize()
             return ex_type, val
@@ -451,7 +499,8 @@ class Validator:
                 expr_to_evaluate = expression.objects[0]
                 return self.solve_expression(expr_to_evaluate)
             elif expression.type == 'error':
-                self.errors.append(self._err(expression.line, self.solve_expression(expression.objects[0])[1]))
+                msg = self.solve_expression(expression.objects[0])
+                self._error(expression.line, msg[1] if msg is not None else "error")
                 return None
             else:
                 self.solve_expression(expression, make_true=True)
@@ -468,7 +517,7 @@ class Validator:
         if operator == 'ASSIGN' and isinstance(left, Expression) and left.operator == 'FIELDACCESS':
             tuple_name = left.left[1]
             field_name = left.right[1]
-            t_var = self.variables.get(tuple_name)
+            t_var = self.scope_stack[-1].get(tuple_name)
             if t_var is None or t_var[0] != 'Namedtuple':
                 self.errors.append(self._err(expr.line, f"'{tuple_name}' is not a namedtuple"))
                 return None
@@ -485,7 +534,7 @@ class Validator:
         if operator == 'ASSIGN' and isinstance(left, Expression) and left.operator == 'INDEXACCESS':
             tuple_name = left.left[1]
             index = left.right[1]
-            t_var = self.variables.get(tuple_name)
+            t_var = self.scope_stack[-1].get(tuple_name)
             if t_var is None or t_var[0] != 'Tuple':
                 self.errors.append(self._err(expr.line, f"'{tuple_name}' is not a tuple"))
                 return None
@@ -500,8 +549,8 @@ class Validator:
         if operator == 'ASSIGN' and isinstance(left, tuple) and isinstance(right, tuple):
             if left[0] == 'VARIABLE' and right[0] == 'VARIABLE' and left[1].isupper() and right[1].isupper() and len(
                     left[1]) != 2:
-                l_var = self.variables.get(left[1])
-                r_var = self.variables.get(right[1])
+                l_var = self.scope_stack[-1].get(left[1])
+                r_var = self.scope_stack[-1].get(right[1])
                 if l_var is None:
                     self.errors.append(self._err(expr.line, f"Undefined ident '{left[1]}'"))
                     return None
@@ -516,7 +565,7 @@ class Validator:
                             l_pool = l_var[1]['_congruence']
                             r_pool = r_var[1]['_congruence']
                             if l_pool != r_pool:
-                                for name, var in self.variables.items():
+                                for name, var in self.scope_stack[-1].items():
                                     if isinstance(var[1], dict) and var[1].get('_congruence') == r_pool:
                                         var[1]['_congruence'] = l_pool
                 return 'Bool', 'true'
@@ -548,7 +597,7 @@ class Validator:
 
         if right == 'none_for_unary':
             if left[0] == 'VARIABLE':
-                x_var = self.variables.get(left[1])
+                x_var = self.scope_stack[-1].get(left[1])
                 if x_var is None:
                     self.errors.append(self._err(expr.line, f"Undefined variable '{left[1]}'."))
                     return None
@@ -595,7 +644,6 @@ class Validator:
                         if self.has_fact(expr, ('Bool', 'true')):
                             return op_def[0], 'true'
                     if result is None:
-                        self.errors.append(self._err(expr.line, f"Operation {operator} produced no result"))
                         return None
                     return result
 
@@ -605,9 +653,9 @@ class Validator:
             if (is_ident or is_angle) and operator != 'FIELDACCESS':
                 left = left[0], self.normalize_object(left[1])
                 name = left[1]
-                l_var = self.variables.get(name)
+                l_var = self.scope_stack[-1].get(name)
                 if l_var is None:
-                    if is_angle or all(ch in self.variables for ch in left[1]):
+                    if is_angle or all(ch in self.scope_stack[-1] for ch in left[1]):
                         l_var = self._create_ident(name)
                     else:
                         self.errors.append(self._err(expr.line, f"Undefined ident '{left[1]}'."))
@@ -633,7 +681,7 @@ class Validator:
                             l_type = 'special_type_pool'
                             left_value = left_value['_congruence']
             else:
-                l_var = self.variables.get(left[1])
+                l_var = self.scope_stack[-1].get(left[1])
                 if l_var is None:
                     self.errors.append(self._err(expr.line, f"Undefined variable '{left[1]}'."))
                     return None
@@ -660,7 +708,7 @@ class Validator:
                     return None
                 return (field[0], field[1])
             elif operator == 'INDEXACCESS':
-                if l_type != 'Tuple':
+                if self._resolve_base_type(l_type) != 'Tuple':
                     self.errors.append(self._err(expr.line, f"Can't access index of object of type {l_type}."))
                     return None
                 index = right[1] - 1
@@ -678,9 +726,9 @@ class Validator:
                 if (is_ident or is_angle) and operator != 'FIELDACCESS':
                     right = right[0], self.normalize_object(right[1])
                     name = right[1]
-                    r_var = self.variables.get(name)
+                    r_var = self.scope_stack[-1].get(name)
                     if r_var is None:
-                        if is_angle or all(ch in self.variables for ch in right[1]):
+                        if is_angle or all(ch in self.scope_stack[-1] for ch in right[1]):
                             r_var = self._create_ident(name)
                         else:
                             self.errors.append(self._err(expr.line, f"Undefined ident '{right[1]}'."))
@@ -709,9 +757,8 @@ class Validator:
                                 r_type = 'special_type_pool'
                                 right_value = right_value['_congruence']
                 else:
-                    r_var = self.variables.get(right[1])
+                    r_var = self.scope_stack[-1].get(right[1])
                     if r_var is None:
-                        self.errors.append(self._err(expr.line, f"{self.variables}"))
                         self.errors.append(self._err(expr.line, f"Undefined variable '{right[1]}'."))
                         return None
                     r_type = r_var[0]
@@ -721,6 +768,7 @@ class Validator:
             if right[0].upper().startswith('LIT'):
                 r_type = r_type[3:].capitalize()
             right_value = right[1]
+
 
         if operator == 'ASSIGN':
             if left[0] != 'VARIABLE':
@@ -732,18 +780,18 @@ class Validator:
                 return None
             left_name = left[1]
 
-            if left[0] == 'VARIABLE' and isinstance(self.variables[left_name][1], dict) and '_congruence' in self.variables[left_name][1]:
-                l_pool = self.variables[left_name][1]['_congruence']
+            if left[0] == 'VARIABLE' and isinstance(self.scope_stack[-1][left_name][1], dict) and '_congruence' in self.scope_stack[-1][left_name][1]:
+                l_pool = self.scope_stack[-1][left_name][1]['_congruence']
                 r_pool = right_value['_congruence'] if isinstance(right_value, dict) else right_value
                 if l_pool != r_pool:
-                    for name, var in self.variables.items():
+                    for name, var in self.scope_stack[-1].items():
                         if isinstance(var[1], dict) and var[1].get('_congruence') == r_pool:
                             var[1]['_congruence'] = l_pool
                 if isinstance(right_value, dict) and right_value.get('length', [None, None])[1] is not None:
-                    self.variables[left_name][1]['length'] = right_value['length']
+                    self.scope_stack[-1][left_name][1]['length'] = right_value['length']
 
             elif left[0] == 'VARIABLE':
-                self.variables[left_name][1] = right_value
+                self.scope_stack[-1][left_name][1] = right_value
 
             else:
                 self.errors.append(self._err(expr.line, f"Cannot assign to literal '{left[1]}'"))
@@ -766,30 +814,15 @@ class Validator:
                     self.errors.append(
                         self._err(expr.line, f"Operator {operator} is not defined for {l_type} and {r_type}"))
                     return None
+
             else:
-                if op_def[2]:
-                    extern_name = op_def[2]['extern'][0]
-                    return self.call_extern(extern_name, left_value, right_value, expr.line, op_def[0])
-                else:
-                    self.variables['first'] = [l_type, left_value]
-                    self.variables['second'] = [r_type, right_value]
-                    result = None
-                    try:
-                        for statement in op_def[1]:
-                            if isinstance(statement, Statement) and statement.type == 'gives':
-                                result = self.solve_expression(statement)
-                                break
-                            else:
-                                self.solve_expression(statement, make_true=True)
-                    finally:
-                        self.variables.pop('first', None)
-                        self.variables.pop('second', None)
-                    if result is None:
-                        self.errors.append(self._err(expr.line, f"Operation {operator} produced no result"))
-                        return None
-                    return result
+                result = self._call_op(op_def, {'first': [l_type, left_value], 'second': [r_type, right_value]},
+                                       line=expr.line)
+                if result is None:
+                    return None
+                return result
         elif operator == 'INDEXACCESS':
-            if l_type != 'Tuple':
+            if self._resolve_base_type(l_type) != 'Tuple':
                 self.errors.append(self._err(expr.line, f"Can't access index of object of type {l_type}."))
                 return None
             index = right_value
@@ -800,10 +833,24 @@ class Validator:
             if element is None:
                 self.errors.append(self._err(expr.line, f"Can't access index {right_value} of '{left[1]}'."))
                 return None
-            return (element[0], element[1])
+            element = left_value[index]
+            if isinstance(element, Expression) or (isinstance(element, list) and isinstance(element[1], Expression)):
+                solved = self.solve_expression(element[1] if isinstance(element, list) else element)
+                return (solved[0], solved[1]) if solved else None
+            return element[0], element[1]
+        elif operator == 'INTO':
+            if r_type != 'Type':
+                self.errors.append(self._err(expr.line, f"Right side of 'into' must be a type, got {r_type}"))
+                return None
+
+            result = self._cast(left_value, l_type, right_value, expr.line)
+            if result is None:
+                self.errors.append(self._err(expr.line, f"Cannot cast type '{l_type}' into '{right_value}' {left_value, l_type, right_value}"))
+                return None
+            return result
         else:
             while l_type == 'VARIABLE':
-                val = self.variables.get(left_value)
+                val = self.scope_stack[-1].get(left_value)
                 if val is None:
                     self.errors.append(
                         self._err(expr.line, f"Variable {left_value} doesn't exist."))
@@ -813,7 +860,7 @@ class Validator:
                     l_type = val[0]
                     break
             while r_type == 'VARIABLE':
-                val = self.variables.get(right_value)
+                val = self.scope_stack[-1].get(right_value)
                 if val is None:
                     self.errors.append(
                         self._err(expr.line, f"Variable {right_value} doesn't exist."))
@@ -846,7 +893,6 @@ class Validator:
                         if self.has_fact(expr, ('Bool', 'true')):
                             return op_def[0], 'true'
                     if result is None:
-                        self.errors.append(self._err(expr.line, f"Operation {operator} produced no result"))
                         return None
                     return result
 
@@ -859,18 +905,17 @@ class Validator:
         if not matches:
             return True
 
-        # resolve through accepts chain
         accepted_type = value_type
         accepts = type_info[2]
         if value_type == type_name and accepts:
-            accepted_type = accepts[0]  # use the accepted base type
+            accepted_type = accepts[0]
 
         for match_expr in matches:
-            self.variables['self'] = [accepted_type, value]
+            self.scope_stack[-1]['self'] = [accepted_type, value]
             try:
                 result = self.solve_expression(match_expr)
             finally:
-                self.variables.pop('self', None)
+                self.scope_stack[-1].pop('self', None)
 
             if result is None or result[1] != 'true':
                 return False
@@ -893,7 +938,7 @@ class Validator:
                     entry = ['Namedtuple', {'_congruence': pid, 'length': ['Int', None]}]
                 case _:
                     entry = ['Namedtuple', {'_congruence': pid, 'area': ['Int', None], 'perimeter': ['Int', None]}]
-        self.variables[name] = entry
+        self.scope_stack[-1][name] = entry
         return entry
 
     def has_fact(self, left, right, s_type='eq'):
@@ -908,187 +953,262 @@ class Validator:
         self.facts[left_canon].append((s_type, right_canon))
         self.facts[right_canon].append((s_type, left_canon))
 
+    def _cast(self, value, from_type, to_type, line):
+        # 0. identity
+        if from_type == to_type:
+            return [to_type, value]
+
+        # 1. structural promotion
+        if isinstance(value, list):
+            resolved = []
+            for elem in value:
+                if isinstance(elem, tuple) and elem[0] == 'VARIABLE':
+                    var = self.scope_stack[-1].get(elem[1])
+                    resolved.append([var[0], var[1]] if var else [None, None])
+                elif isinstance(elem, list):
+                    if isinstance(elem[1], Expression):
+                        solved = self.solve_expression(elem[1])
+                        resolved.append([solved[0], solved[1]] if solved else [None, None])
+                    else:
+                        resolved.append(elem)
+                elif isinstance(elem, Expression):
+                    solved = self.solve_expression(elem)
+                    resolved.append([solved[0], solved[1]] if solved else [None, None])
+                else:
+                    resolved.append(elem)
+            value = resolved
+
+        # 2. check type's accepts field
+        if to_type in self.types:
+            t = self.types[to_type]
+            accepts = t[2] if isinstance(t, tuple) else t.get('accepts')
+            if from_type in accepts or self._resolve_base_type(from_type) in accepts:
+                match_result = self.check_match(to_type, from_type, value, line)
+                if match_result:
+                    return [to_type, value]
+
+        # 3. save scope, inject type names
+        saved = dict(self.scope_stack[-1])
+        for name in self.types:
+            if name not in self.scope_stack[-1]:
+                self.scope_stack[-1][name] = ['Type', name]
+
+        args = {
+            'first': [from_type, value],
+            'second': ['Type', to_type]
+        }
+
+        # 4. specific into operation
+        t = self.normalize_comparison(from_type, 'INTO', 'Type')
+        op_def = self.operations.get(t)
+
+        if op_def is not None:
+            if op_def[2]:
+                extern_name = op_def[2]['extern'][0]
+                return self.call_extern(extern_name, None, from_type, line, op_def[0])
+            else:
+                result = self._call_op(op_def, args, line=line)
+                if result is not None:
+                    return [to_type, result[1]]
+
+        # 5. Any fallback
+        op_def = self.operations.get(('into', 'Any'))
+        if op_def is not None:
+            result = self._call_op(op_def, args, line=line)
+            self.scope_stack[-1] = saved
+            if result is not None:
+                return [to_type, result[1]]
+
+        self.scope_stack[-1] = saved
+        return None
+
     def process_statement(self, stmt: Statement, is_hypothesis: bool):
+        self.call_stack.append(f"statement '{stmt.type}' (line {stmt.line})")
         make_true = is_hypothesis or (stmt.in_let and not self.last_let_failed)
-        if self.contradictory:
-            return
-        elif stmt.type == 'axiom_application':
-            self.last_axiom_failed = not self.apply_axiom(stmt)
-            return
 
-        elif stmt.type == 'let':
-            self.last_let_failed = False
-            stmt_object = stmt.objects[0]
-            value = stmt.value
-
-            if isinstance(stmt_object, Expression):
-                self.add_fact(stmt_object, value)
+        try:
+            if self.contradictory:
                 return
+            elif stmt.type == 'axiom_application':
+                self.last_axiom_failed = not self.apply_axiom(stmt)
+                return None
 
-            if stmt_object[0] == 'VARIABLE':
-                def_type = None
-                if value is not None:
-                    if type(value) is tuple:
-                        if value[0].startswith('LIT'):
-                            def_type = value[0][3:].capitalize()
-                            value = value[1]
-                        elif value[0] == 'NAMEDTUPLE':
-                            fields = {}
-                            for field_expr in value[1]:
-                                field_name = field_expr.left[1]
-                                field_value = self.solve_expression(field_expr.right, make_true)
-                                fields[field_name] = [field_value[0] if field_value else None,
-                                                      field_value[1] if field_value else None]
-                            self.variables[stmt_object[1]] = ['Namedtuple', fields]
-                            return
-                        elif value[0] == 'TUPLE':
-                            fields = []
-                            for field in value[1]:
-                                field_value = self.solve_expression(field, make_true)
-                                fields.append([field_value[0] if field_value else None,
-                                               field_value[1] if field_value else None])
-                            self.variables[stmt_object[1]] = ['Tuple', fields]
-                            return
-                        elif value[0] == 'VARIABLE':
-                            ref = self.variables.get(value[1])
-                            if ref is not None:
-                                def_type = ref[0]
-                                value = ref[1]
+            elif stmt.type == 'let':
+                self.last_let_failed = False
+                stmt_object = stmt.objects[0]
+                value = stmt.value
+
+
+                if isinstance(stmt_object, Expression):
+                    self.add_fact(stmt_object, value)
+                    return
+
+                if stmt_object[0] == 'VARIABLE':
+                    def_type = None
+                    if value is not None:
+                        if type(value) is tuple:
+                            if value[0].startswith('LIT'):
+                                def_type = value[0][3:].capitalize()
+                                value = value[1]
+                            elif value[0] == 'TUPLE':
+                                fields = []
+                                for field in value[1]:
+                                    field_value = self.solve_expression(field, make_true)
+                                    fields.append([field_value[0] if field_value else None,
+                                                   field_value[1] if field_value else None])
+                                def_type = 'Tuple'
+                                value = ('Tuple', fields)
+                            elif value[0] == 'NAMEDTUPLE':
+                                fields = {}
+                                for field_expr in value[1]:
+                                    field_name = field_expr.left[1]
+                                    field_value = self.solve_expression(field_expr.right, make_true)
+                                    fields[field_name] = [field_value[0] if field_value else None,
+                                                          field_value[1] if field_value else None]
+                                def_type = 'Namedtuple'
+                                value = ('Namedtuple', fields)
+                            elif value[0] == 'VARIABLE':
+                                ref = self.scope_stack[-1].get(value[1])
+                                if ref is not None:
+                                    def_type = ref[0]
+                                    value = ref[1]
+                                else:
+                                    value = None
+                        else:
+                            value = self.solve_expression(value, make_true)
+                            if value is None:
+                                self.scope_stack[-1][stmt_object[1]] = [def_type, None]
+                                return
+                    if value is None:
+                        self.scope_stack[-1][stmt_object[1]] = [def_type, None]
+                    else:
+                        if def_type is None:
+                            def_type = value[0] if isinstance(value, tuple) else def_type
+                        self.scope_stack[-1][stmt_object[1]] = [def_type, value[1] if isinstance(value, tuple) else value]
+
+                elif stmt_object[0] == 'IDENT':
+                    value_to_assign = None
+                    if value is not None:
+                        if type(value) is tuple:
+                            if value[0].startswith('LIT'):
+                                value_to_assign = value[1]
                             else:
-                                value = None
-                    else:
-                        value = self.solve_expression(value, make_true)
-                        if value is None:
-                            value = "pass_none"
-                if value is None:
-                    self.variables[stmt_object[1]] = [def_type, None]
+                                ref = self.scope_stack[-1].get(value[1])
+                                if ref is None and value[1].isupper() and all(ch in self.scope_stack[-1] for ch in value[1]):
+                                    ref = self._create_ident(value[1])
+                                if ref is None:
+                                    self._error(stmt.line, f"Undefined variable '{value[1]}'")
+                                    return
+                                value_to_assign = ref[1]
+                        else:
+                            resolved = self.solve_expression(value, make_true)
+                            value_to_assign = resolved[1] if resolved else None
+
+                    ident = self._create_ident(stmt_object[1])
+
+                    if value_to_assign is not None:
+                        if len(stmt_object[1]) == 2:
+                            if isinstance(value_to_assign, dict):
+                                l_pool = ident[1]['_congruence']
+                                r_pool = value_to_assign['_congruence']
+                                if l_pool != r_pool:
+                                    for var in self.scope_stack[-1].values():
+                                        if isinstance(var[1], dict) and var[1].get('_congruence') == r_pool:
+                                            var[1]['_congruence'] = l_pool
+                                if value_to_assign.get('length', [None, None])[1] is not None:
+                                    ident[1]['length'][1] = value_to_assign['length'][1]
+                            else:
+                                ident[1]['length'][1] = value_to_assign
+
+                elif stmt_object[0] == 'ANGLE':
+                    value_to_assign = None
+                    if value is not None:
+                        if type(value) is tuple:
+                            if value[0].startswith('LIT'):
+                                value_to_assign = value[1]
+                            else:
+                                ref = self.scope_stack[-1].get(value[1])
+                                if ref is None and value[1].isupper() and all(ch in self.scope_stack[-1] for ch in value[1]):
+                                    ref = self._create_ident(value[1])
+                                if ref is None:
+                                    self._error(stmt.line, f"Undefined variable '{value[1]}'")
+                                    return
+                                value_to_assign = ref[1]
+                        else:
+                            resolved = self.solve_expression(value, make_true)
+                            value_to_assign = resolved[1] if resolved else None
+
+                    ident = self._create_ident(stmt_object[1])
+
+                    if value_to_assign is not None:
+                        ident[1]['degrees'][1] = value_to_assign
+
                 else:
-                    if def_type is None:
-                        def_type = value[0] if isinstance(value, tuple) else def_type
-                    self.variables[stmt_object[1]] = [def_type, value[1] if isinstance(value, tuple) else value]
+                    pass
 
-            elif stmt_object[0] == 'IDENT':
-                value_to_assign = None
-                if value is not None:
-                    if type(value) is tuple:
-                        if value[0].startswith('LIT'):
-                            value_to_assign = value[1]
-                        else:
-                            ref = self.variables.get(value[1])
-                            if ref is None and value[1].isupper() and all(ch in self.variables for ch in value[1]):
-                                ref = self._create_ident(value[1])
-                            if ref is None:
-                                self.errors.append(self._err(stmt.line, f"Undefined variable '{value[1]}'"))
-                                return
-                            value_to_assign = ref[1]
+            elif stmt.type == 'typehint':
+                variable = stmt.objects[0]
+                type_name = stmt.objects[1]
+                if type_name in self.types:
+                    o_type = type_name
+                else:
+                    var_ref = self.scope_stack[-1].get(type_name)
+                    if var_ref is not None and var_ref[0] == 'Type' and var_ref[1] in self.types:
+                        o_type = var_ref[1]
+                    elif type_name in self.aliases:
+                        o_type = self.aliases[type_name]
                     else:
-                        resolved = self.solve_expression(value, make_true)
-                        value_to_assign = resolved[1] if resolved else None
-
-                ident = self._create_ident(stmt_object[1])
-
-                if value_to_assign is not None:
-                    if len(stmt_object[1]) == 2:
-                        if isinstance(value_to_assign, dict):
-                            l_pool = ident[1]['_congruence']
-                            r_pool = value_to_assign['_congruence']
-                            if l_pool != r_pool:
-                                for var in self.variables.values():
-                                    if isinstance(var[1], dict) and var[1].get('_congruence') == r_pool:
-                                        var[1]['_congruence'] = l_pool
-                            if value_to_assign.get('length', [None, None])[1] is not None:
-                                ident[1]['length'][1] = value_to_assign['length'][1]
-                        else:
-                            ident[1]['length'][1] = value_to_assign
-
-            elif stmt_object[0] == 'ANGLE':
-                value_to_assign = None
-                if value is not None:
-                    if type(value) is tuple:
-                        if value[0].startswith('LIT'):
-                            value_to_assign = value[1]
-                        else:
-                            ref = self.variables.get(value[1])
-                            if ref is None and value[1].isupper() and all(ch in self.variables for ch in value[1]):
-                                ref = self._create_ident(value[1])
-                            if ref is None:
-                                self.errors.append(self._err(stmt.line, f"Undefined variable '{value[1]}'"))
-                                return
-                            value_to_assign = ref[1]
-                    else:
-                        resolved = self.solve_expression(value, make_true)
-                        value_to_assign = resolved[1] if resolved else None
-
-                ident = self._create_ident(stmt_object[1])
-
-                if value_to_assign is not None:
-                    ident[1]['degrees'][1] = value_to_assign
-
-            else:
-                pass
-
-        elif stmt.type == 'typehint':
-            variable = stmt.objects[0]
-            if stmt.objects[1] in self.types:
-                o_type = stmt.objects[1]
-                var = self.variables.get(variable)
+                        self._error(stmt.line, f"Undefined type '{type_name}'")
+                        return
+                var = self.scope_stack[-1].get(variable)
                 if var is None:
-                    self.variables[variable] = [o_type, None]
+                    self.scope_stack[-1][variable] = [o_type, None]
                 else:
-                    var[0] = o_type
-                    if var[1] is not None:
-                        if not self.check_match(o_type, var[0], var[1], stmt.line):
-                            self.errors.append(
-                                self._err(stmt.line, f"Value does not match constraints for type '{o_type}'"))
+                    old_type = var[0]
+                    if var[1] is not None and old_type != o_type:
+                        cast_result = self._cast(var[1], old_type, o_type, stmt.line)
+                        if cast_result is not None:
+                            var[0], var[1] = cast_result
+                        elif not self.check_match(o_type, old_type, var[1], stmt.line):
+                            self._error(stmt.line,
+                                        f"Value '{var[1]}' of type '{old_type}' does not match declared type '{o_type}'")
                             self.last_let_failed = True
-            else:
-                if stmt.objects[1] in self.aliases:
-                    o_type = self.aliases[stmt.objects[1]]
-                    var = self.variables.get(variable)
-                    if var is None:
-                        self.variables[variable] = [o_type, None]
-                    else:
-                        var[0] = o_type
-                        if var[1] is not None:
-                            if not self.check_match(o_type, var[0], var[1], stmt.line):
-                                self.errors.append(
-                                    self._err(stmt.line, f"Value does not match constraints for type '{o_type}'"))
-                                self.last_let_failed = True
+                            return
+                    var[0] = o_type
+
+            elif stmt.type == 'expression':
+                res = self.solve_expression(stmt.objects[0], make_true)
+                if res is not None:
+                    if res[0] == 'Bool':
+                        if make_true:
+                            if res[1] == 'false':
+                                self.contradictory = True
+                        else:
+                            if res[1] == 'false':
+                                self._error(stmt.line, f"'{stmt.objects[1]}' is false")
+
+            elif stmt.type == 'if':
+                condition, then_block, else_block = stmt.objects
+                cond_result = self.solve_expression(condition)
+                if cond_result is not None and cond_result[1] == 'true':
+                    for s in then_block:
+                        self.process_statement(s, is_hypothesis)
                 else:
-                    self.errors.append(self._err(stmt.line, f"Undefined type '{stmt.objects[1]}'"))
+                    for s in else_block:
+                        self.process_statement(s, is_hypothesis)
 
-        elif stmt.type == 'print': #this is wrong generally but idc for now
-            print(self.variables.get(stmt.objects[0])[1])
-            return
+            elif stmt.type == 'error':
+                msg = self.solve_expression(stmt.objects[0])
+                self._error(stmt.line, msg[1] if msg is not None else "error")
+                return None
 
-        elif stmt.type == 'expression':
-            res = self.solve_expression(stmt.objects[0], make_true)
-            if res is not None:
-                if res[0] == 'Bool':
-                    if make_true:
-                        if res[1] == 'false':
-                            self.contradictory = True
-                    else:
-                        if res[1] == 'false':
-                            self.errors.append(self._err(stmt.line,
-                                                         f"'{stmt.objects[1]}' is false"))
-
-        elif stmt.type == 'if':
-            condition, then_block, else_block = stmt.objects
-            cond_result = self.solve_expression(condition)
-            if cond_result is not None and cond_result[1] == 'true':
-                for s in then_block:
-                    self.process_statement(s, is_hypothesis)
             else:
-                for s in else_block:
-                    self.process_statement(s, is_hypothesis)
+                print(f"Unknown statement type {stmt.type}")
+                return None
 
-        elif stmt.type == 'error':
-            self.errors.append(self._err(stmt.line, self.solve_expression(stmt.objects[0])[1]))
-            return None
-
-        else:
-            print(f"Unknown statement type {stmt.type}")
+        finally:
+            self.call_depth -= 1
+            self.call_stack.pop()
 
     def _build_bindings(self, axiom, raw_args):
         from itertools import permutations, product
@@ -1232,7 +1352,7 @@ class Validator:
     def _has_unknowns(self, stmt):
         for obj in stmt.objects:
             if isinstance(obj, str):
-                var = self.variables.get(obj)
+                var = self.scope_stack[-1].get(obj)
                 if var is not None and var[1] is None:
                     return True
         return False
@@ -1250,7 +1370,7 @@ class Validator:
         raw_args = []
         for arg in stmt.value:
             if isinstance(arg, tuple) and arg[0] == 'VARIABLE':
-                var = self.variables.get(arg[1])
+                var = self.scope_stack[-1].get(arg[1])
                 if var is not None and var[1] is not None:
                     raw_args.append(var[1])
                 else:

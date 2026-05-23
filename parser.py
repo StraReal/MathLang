@@ -1,13 +1,11 @@
 from common_classes import *
-from itertools import combinations
 
 attributes = {}
-HIGHEST_IMPORTANCE = 12 # 1 above the highest defined precedence
+HIGHEST_IMPORTANCE = 10 # 1 above the highest defined precedence
 OP_MAP = {  # Use https://docs.python.org/3/reference/expressions.html#operator-precedence for reference
             # TOKEN TYPE |      SYMBOL     | INFIX PREC,LEFT-ASS |  PREFIX PREC   | POSTFIX PREC | DISTFIX (closed) PREC
-            'GETTYPE':    Operator("getType",                         prefix=12),
-            'LBRACKET':   Operator("[",                                                           distfix=("]", 11, True, "INDEXACCESS")),
-            'FIELDACCESS':Operator("'s ",    infix=(11,True)),
+            'LBRACKET':   Operator("[",                                                           distfix=("]", 12, True, "INDEXACCESS")),
+            'FIELDACCESS':Operator("'s ",    infix=(12,True)),
             'FACTORIAL':  Operator('!',                                             postfix=10),
             'EXPONENT':   Operator('^',      infix=(9, True)),
             'MULTIPLY':   Operator('*',      infix=(7, True)),
@@ -30,6 +28,8 @@ OP_MAP = {  # Use https://docs.python.org/3/reference/expressions.html#operator-
             'XOR':        Operator('xor',    infix=(2, True)),
             'NOR':        Operator('nor',    infix=(1, True)),
             'OR':         Operator('or',     infix=(1, True)),
+            'GETTYPE':    Operator("typeOf",                          prefix=0),
+            'PRINT':      Operator('print',                           prefix=0),
             'ASSIGN':     Operator('=',      infix=(0, True)),
         }
 
@@ -41,7 +41,7 @@ class Parser:
         self.theorems: Dict[str, TheoremDefinition] = {}
         self.import_map: dict = import_map
         self.operations = {}
-        self.types = {}
+        self.types = ['Type']
         self.pending_attributes = {}
         self.last_precolon = None
 
@@ -63,7 +63,7 @@ class Parser:
         proofs = []
         ordered : List[tuple[str, Any]] = [('type', ['Type', [], [], []]),]
 
-        hypothesis_to_append.append(Statement('let', [('VARIABLE', 'Type')], value=('LITSTR', 'Type'), line=self.current().line_num))
+        hypothesis_to_append.append(Statement('let', [('VARIABLE', 'Type')], value=('Type', 'Type'), line=self.current().line_num))
         hypothesis_to_append.append(Statement('typehint', ['Type', 'Type'], line=self.current().line_num))
 
         while self.current().type != 'EOF':
@@ -104,8 +104,8 @@ class Parser:
 
             elif self.current().type == 'TYPE':
                 td = self.parse_type()
-                self.types[td[0]] = td[0]
-                hypothesis_to_append.append(Statement('let', [('VARIABLE', td[0])], value=('LITSTR', td[0]), line=self.current().line_num))
+                self.types.append(td[0])
+                hypothesis_to_append.append(Statement('let', [('VARIABLE', td[0])], value=('Type', td[0]), line=self.current().line_num))
                 hypothesis_to_append.append(Statement('typehint', [td[0], 'Type'], line=self.current().line_num))
                 ordered.append(('type', td)) # name, aliases, accepts, matches, witnesses
             elif self.current().type == 'IMPORT':
@@ -317,7 +317,7 @@ class Parser:
         attributes = self.pending_attributes
         self.pending_attributes = {}
 
-        return OperationDefinition(
+        o = OperationDefinition(
             left_type=left_type,
             operator=operator,
             right_type=right_type,
@@ -326,6 +326,7 @@ class Parser:
             witnesses=witnesses,
             attributes=attributes,
         )
+        return o
 
     def parse_type(self):
         self.advance()  # skip 'type'
@@ -680,11 +681,6 @@ class Parser:
             expr = self.expr()
             s = Statement('expression', [expr, l.strip()], line=self.current().line_num)
             statements.append(s)
-            self.advance()
-
-        elif self.current().type == 'PRINT':
-            self.advance()
-            statements.append(Statement('print', [self.current().value], line=line))
             self.advance()
 
         elif self.current().type == 'GIVES':

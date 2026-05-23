@@ -1,6 +1,7 @@
 from parser import *
 from validator import *
 
+debug = False
 simple_keywords = { #require space or end
     'let': 'LET',
     'iso': 'ISO',
@@ -36,11 +37,12 @@ simple_keywords = { #require space or end
     'div': 'INT_DIV',
     'with witness': 'WITH_WITNESS',
     'witness': 'WITNESS',
-    'getType': 'GETTYPE',
+    'typeOf': 'GETTYPE',
     'if': 'IF',
     'else': 'ELSE',
     'into': 'INTO',
-    'error': 'ERROR'
+    'error': 'ERROR',
+    'for': 'FOR',
 }
 
 colon_keywords = {
@@ -402,14 +404,15 @@ import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
 validator = Validator(import_map)
 validator.validate(axioms, hypothesis, ordered, proofs)
 
-print("=== Axioms ===")
-for name, axiom in axioms.items():
-    print(f"  {name}: {len(axiom.given)} hypothesis statements")
+if debug:
+    print("=== Axioms ===")
+    for name, axiom in axioms.items():
+        print(f"  {name}: {len(axiom.given)} hypothesis statements")
 
-print("=== Parsed ===")
-if hypothesis:
-    print(f"Hypothesis: {len(hypothesis)} statements")
-print(f"Proofs: {len(proofs)} statements")
+    print("=== Parsed ===")
+    if hypothesis:
+        print(f"Hypothesis: {len(hypothesis)} statements")
+    print(f"Proofs: {len(proofs)} statements")
 
 if validator.errors:
     cprint("\n=== Validation ===", 'r')
