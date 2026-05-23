@@ -93,17 +93,11 @@ operation Int < Int -> Bool
 @[extern int_div]
 operation Int div Int -> Int
 
-operation Int / Int -> Fraction
-    gives (first, second) into Fraction
-
 operation Int != Int -> Bool
     gives not (first equals second)
 
 @[extern sub]
 operation Int - Int -> Int
-
-operation Int != Int -> Bool
-    gives not first equals second
 
 @[extern and]
 operation Bool and Bool -> Bool
@@ -218,16 +212,28 @@ operation Fraction into Type
             error "Fraction " + (first into Str) + " can't be converted into integer"
     error "Can't convert type Tuple into " + (stringConvert second)
 
+operation simplifyFraction Tuple -> Fraction
+    let numerator be integer = first[0]
+    let denominator be integer = first[1]
+    let g be integer = numerator gcd denominator
+    gives ((numerator div g, denominator div g) into Fraction)
+
 operation simplifyFraction Fraction -> Fraction
     let numerator be integer = first[0]
     let denominator be integer = first[1]
     let g be integer = numerator gcd denominator
-    gives (numerator div g, denominator div g)
+    gives ((numerator div g, denominator div g) into Fraction)
 
 operation Fraction * Fraction -> Fraction
     let newNumerator be integer = first[0] * second[0]
     let newDenominator be integer = first[1] * second[1]
-    let newFraction be Fraction = simplifyFraction ((newNumerator, newDenominator) into Fraction)
+    let newFraction be Fraction = simplifyFraction (newNumerator, newDenominator)
+    gives newFraction
+
+operation Fraction / Fraction -> Fraction
+    let newNumerator be integer = first[0] * second[1]
+    let newDenominator be integer = first[1] * second[0]
+    let newFraction be Fraction = simplifyFraction (newNumerator, newDenominator)
     gives newFraction
 
 operation Fraction equals Int -> Bool
@@ -236,12 +242,27 @@ operation Fraction equals Int -> Bool
     else
         gives false
 
+operation Int / Int -> Fraction
+    gives simplifyFraction (first, second)
 
-operation Fraction / Fraction -> Fraction
-    let newNumerator be integer = first[0] * second[1]
-    let newDenominator be integer = first[1] * second[0]
-    let newFraction be Fraction = simplifyFraction ((newNumerator, newDenominator) into Fraction)
-    gives newFraction
+operation Fraction * Int -> Fraction
+    gives simplifyFraction (first[0] * second, first[1])
+
+operation Fraction / Int -> Fraction
+    gives simplifyFraction (first[0], first[1] * second)
+
+operation Int % -> Fraction
+    gives first / 100
+
+operation Fraction % -> Fraction
+    gives first / 100
+
+operation Int % of Int -> Fraction
+    gives (first / 100) * second
+
+operation Fraction % of Int -> Fraction
+    gives (first / 100) * second
+
 
 @[extern print]
 operation print Int -> Undefined

@@ -79,7 +79,9 @@ operators = {
     '>=': 'GETHAN',
     '<=': 'LETHAN',
     '!=': 'INEQUALS',
+    "%" : 'PERCENT',
     "'s ": 'FIELDACCESS',
+    '% of ': 'PERCENTOF'
 }
 
 literals = {

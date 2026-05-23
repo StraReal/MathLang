@@ -5,7 +5,14 @@ Hypothesis:
     let ff be Fraction = (1, 2)
     let sf be Fraction = (4,6)
     let rf be Fraction = (3,1)
+    let a be Int
+    let b be Int
 Proof:
     print "Result: " + ((ff/sf) into Str)
     rf equals 3
     print typeOf rf equals 3
+    print (5%)
+    print ((5%)%)
+    print 10% of 200
+    print 5%%%% of 5!!
+    SideSwitching {a, b} => a + b equals b + a

@@ -471,6 +471,21 @@ class Validator:
         else:
             return expr
 
+    def _resolve_list_elements(self, value):
+        if not isinstance(value, list):
+            return value
+        resolved = []
+        for elem in value:
+            if isinstance(elem, tuple) and elem[0] == 'VARIABLE':
+                r = self.solve_expression(elem)
+                resolved.append([r[0], r[1]] if r else elem)
+            elif isinstance(elem, Expression):
+                r = self.solve_expression(elem)
+                resolved.append([r[0], r[1]] if r else [None, None])
+            else:
+                resolved.append(elem)
+        return resolved
+
     def solve_expression(self, expression, make_true: bool = False) -> Expression | Tuple[str, any] | None:
         if isinstance(expression, tuple):
             val = expression[1]
@@ -479,17 +494,24 @@ class Validator:
             if ex_type == 'VARIABLE':
                 var = self.scope_stack[-1].get(val)
                 if var is not None:
-                    if var[1] is not None:
+                    if var[1] is not None and var[0] is not None:
                         return self.solve_expression(expression=(var[0], var[1]))
                 return 'VARIABLE', val
             if ex_type == 'TUPLE':
                 fields = []
                 for field in val:
-                    field_value = self.solve_expression(field)
-                    fields.append([
-                        field_value[0] if field_value else None,
-                        field_value[1] if field_value else None
-                    ])
+                    if isinstance(field, list):
+                        if isinstance(field[1], str) and field[1] in self.scope_stack[-1]:
+                            resolved = self.solve_expression(('VARIABLE', field[1]))
+                            fields.append([resolved[0], resolved[1]] if resolved else field)
+                        else:
+                            fields.append(field)
+                    else:
+                        field_value = self.solve_expression(field)  # handles Expression, tuple, etc.
+                        fields.append([
+                            field_value[0] if field_value else None,
+                            field_value[1] if field_value else None
+                        ])
                 return 'Tuple', fields
             if ex_type.upper().startswith('LIT'):
                 ex_type = ex_type[3:].capitalize()
@@ -609,6 +631,9 @@ class Validator:
                     x_type = x_type[3:].capitalize()
                 x_value = left[1]
 
+            # resolve any unresolved variable references inside tuple values
+            x_value = self._resolve_list_elements(x_value)
+
             if operator == 'GETTYPE':
                 return 'Type', x_type
 
@@ -687,6 +712,7 @@ class Validator:
                     return None
                 l_type = l_var[0]
                 left_value = l_var[1]
+                left_value = self._resolve_list_elements(left_value)
         else:
             if operator == 'ASSIGN':
                 self.errors.append(self._err(expr.line, f"Can't assign to literal {left[1]}."))
@@ -763,6 +789,7 @@ class Validator:
                         return None
                     r_type = r_var[0]
                     right_value = r_var[1]
+                    right_value = self._resolve_list_elements(right_value)
         else:
             r_type = right[0].capitalize()
             if right[0].upper().startswith('LIT'):
@@ -911,6 +938,8 @@ class Validator:
             accepted_type = accepts[0]
 
         for match_expr in matches:
+            if accepted_type is None:
+                return False  # can't match against unknown type
             self.scope_stack[-1]['self'] = [accepted_type, value]
             try:
                 result = self.solve_expression(match_expr)
@@ -988,7 +1017,6 @@ class Validator:
                     return [to_type, value]
 
         # 3. save scope, inject type names
-        saved = dict(self.scope_stack[-1])
         for name in self.types:
             if name not in self.scope_stack[-1]:
                 self.scope_stack[-1][name] = ['Type', name]
@@ -1005,21 +1033,19 @@ class Validator:
         if op_def is not None:
             if op_def[2]:
                 extern_name = op_def[2]['extern'][0]
-                return self.call_extern(extern_name, None, from_type, line, op_def[0])
+                result = self.call_extern(extern_name, None, from_type, line, op_def[0])
             else:
                 result = self._call_op(op_def, args, line=line)
-                if result is not None:
-                    return [to_type, result[1]]
+            if result is not None:
+                return [to_type, result[1]]
 
         # 5. Any fallback
         op_def = self.operations.get(('into', 'Any'))
         if op_def is not None:
             result = self._call_op(op_def, args, line=line)
-            self.scope_stack[-1] = saved
             if result is not None:
                 return [to_type, result[1]]
 
-        self.scope_stack[-1] = saved
         return None
 
     def process_statement(self, stmt: Statement, is_hypothesis: bool):
@@ -1083,8 +1109,12 @@ class Validator:
                         self.scope_stack[-1][stmt_object[1]] = [def_type, None]
                     else:
                         if def_type is None:
-                            def_type = value[0] if isinstance(value, tuple) else def_type
-                        self.scope_stack[-1][stmt_object[1]] = [def_type, value[1] if isinstance(value, tuple) else value]
+                            if isinstance(value, (tuple, list)):
+                                def_type = value[0]
+                        if isinstance(value, (tuple, list)):
+                            self.scope_stack[-1][stmt_object[1]] = [def_type, value[1]]
+                        else:
+                            self.scope_stack[-1][stmt_object[1]] = [def_type, value]
 
                 elif stmt_object[0] == 'IDENT':
                     value_to_assign = None

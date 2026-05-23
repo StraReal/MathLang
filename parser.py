@@ -6,12 +6,14 @@ OP_MAP = {  # Use https://docs.python.org/3/reference/expressions.html#operator-
             # TOKEN TYPE |      SYMBOL     | INFIX PREC,LEFT-ASS |  PREFIX PREC   | POSTFIX PREC | DISTFIX (closed) PREC
             'LBRACKET':   Operator("[",                                                           distfix=("]", 12, True, "INDEXACCESS")),
             'FIELDACCESS':Operator("'s ",    infix=(12,True)),
+            'PERCENT':    Operator('%',                                             postfix=10),
             'FACTORIAL':  Operator('!',                                             postfix=10),
             'EXPONENT':   Operator('^',      infix=(9, True)),
             'MULTIPLY':   Operator('*',      infix=(7, True)),
             'MODULO':     Operator('mod',    infix=(7, True)),
             'INT_DIV':    Operator('div',    infix=(7, True)),
             'DIVIDE':     Operator('/',      infix=(7, True)),
+            'PERCENTOF':  Operator('% of ',  infix=(7, True)),
             'PLUS':       Operator('+',      infix=(6, True)),
             'MINUS':      Operator('-',      infix=(6, True) ,        prefix=8),
             'INTO':       Operator('into',   infix=(6, True)),
@@ -151,6 +153,7 @@ class Parser:
         let_objects = []
         let_numvars = []
         for stmt in statements:
+            print(stmt)
             if stmt.type == 'let':
                 let_objects.append(stmt.objects[0])
             elif stmt.type == 'let_numvar':
