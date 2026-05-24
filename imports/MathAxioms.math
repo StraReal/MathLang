@@ -19,6 +19,12 @@ operation stringConvert Int -> Str
 @[extern str_conv]
 operation stringConvert Type -> Str
 
+operation stringConvert Bool -> Str
+    if first
+        gives "true"
+    else
+        gives "false"
+
 operation Type into Type
     if second equals Str
         gives stringConvert first
@@ -55,18 +61,6 @@ operation Int gcd Int -> Int
         gives first
     gives second gcd (first mod second)
 
-operation isPrime Int -> Bool
-    if first <= 1
-        gives false
-    gives (first isPrimeHelper 2)
-
-operation Int isPrimeHelper Int -> Bool
-    if second * second > first
-        gives true
-    if first mod second equals 0
-        gives false
-    gives (first isPrimeHelper (second + 1))
-
 
 @[extern neg]
 operation - Int -> Int
@@ -93,8 +87,6 @@ operation Int < Int -> Bool
 @[extern int_div]
 operation Int div Int -> Int
 
-operation Int != Int -> Bool
-    gives not (first equals second)
 
 @[extern sub]
 operation Int - Int -> Int
@@ -127,6 +119,9 @@ operation Bool != Bool -> Bool # yes, it's the same
 
 @[extern len]
 operation length Tuple -> Int
+
+@[extern len]
+operation length Dict -> Int
 
 
 @[extern add]
@@ -192,6 +187,10 @@ operation Tuple into Type
     if second equals Str
         gives stringConvert first
     error "Can't convert type Tuple into " + (stringConvert second)
+
+operation Bool into Type
+    if second equals Str
+        gives stringConvert first
 
 operation validFraction Tuple -> Bool
     if not (length first) equals 2
@@ -263,6 +262,14 @@ operation Int % of Int -> Fraction
 operation Fraction % of Int -> Fraction
     gives (first / 100) * second
 
+operation Int % of Fraction -> Fraction
+    gives (first / 100) * second
+
+operation Fraction % of Fraction -> Fraction
+    gives (first / 100) * second
+
+operation Fraction ^ Int -> Fraction
+    gives simplifyFraction (first[0] ^ second, first[1] ^ second)
 
 @[extern print]
 operation print Int -> Undefined
@@ -279,6 +286,46 @@ operation print Type -> Undefined
 operation print Fraction -> Undefined
     print (first into Str)
 
+operation print Bool -> Undefined
+    print Str(first)
+
+
+operation validRange Tuple -> Bool
+    if not (length first) equals 2
+        gives false
+    gives ((typeOf first[0]) equals Int) and ((typeOf first[1]) equals Int)
+
+type Range
+    accepts Tuple
+    matches validRange self
+
+function isValidRange(r):
+    if not (length r) equals 2
+        gives false
+    gives ((typeOf r[0]) equals Int) and ((typeOf r[1]) equals Int)
+
+function isPrime(n): -> Bool
+    if (typeOf n) != Int
+        gives false
+    if n <= 1
+        gives false
+    gives (isPrimeHelper(n,2))
+
+function isPrimeHelper(a,b): -> Bool
+    if b * b > a
+        gives true
+    if a mod b equals 0
+        gives false
+    gives (isPrimeHelper(a, b + 1))
+
+function lengthsMatch(a, b, c, d): -> Bool
+    if a != (length b)
+        gives false
+    if a != length c
+        gives false
+    if a != length d
+        gives false
+    gives true
 
 axiom SideSwitching:
     Given:

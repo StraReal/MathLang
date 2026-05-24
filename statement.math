@@ -1,18 +1,17 @@
-#import BasicAxioms
 import MathAxioms
 
 Hypothesis:
-    let ff be Fraction = (1, 2)
-    let sf be Fraction = (4,6)
-    let rf be Fraction = (3,1)
-    let a be Int
-    let b be Int
+    let a be Int = 1
+    let b be Int = 4
+    let c be Tuple = (1,2,3,10)
+    let d be Str = "test"
+    let e be Dict = (a = 3, r = 2, t = 7, p = 0)
+
 Proof:
-    print "Result: " + ((ff/sf) into Str)
-    rf equals 3
-    print typeOf rf equals 3
-    print (5%)
-    print ((5%)%)
-    print 10% of 200
-    print 5%%%% of 5!!
-    SideSwitching {a, b} => a + b equals b + a
+    print "1. " + Str(isPrime(3))
+    print "2. " + Str(lengthsMatch(b, c, d, e)) # example function, pretty useless
+    print "3. " + Str(typeOf (Str(1)))
+    print "4. " + Str(Bool(1))
+    print "5. " + Str(Bool(0))
+    print "6. " + Str(true!=true)
+    print "7. " + Str(1+ 3)

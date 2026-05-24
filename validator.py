@@ -7,11 +7,17 @@ from externs import externs
 NON_COMMUTATIVE = ['ASSIGN', 'FIELDACCESS', 'INDEXACCESS', 'DIVIDE', 'MINUS', 'MODULO', 'EXPONENT', 'GREATERTHAN', 'LESSTHAN', "GETHAN", "LETHAN", "IN", "INT_DIV", "INTO"]
 
 
+def _maybe_flip(result, flip):
+    if result is None or flip is False:
+        return result
+    return 'Bool', 'false' if result[1] == 'true' else 'true'
+
 class Validator:
     def __init__(self, import_map: dict):
         self.defined_objects: Set[str] = set()
         self.proof_defined_objects: Set[str] = set()
         self.operations = {}
+        self.functions = {}
         self.types = {}
         self.axioms: Dict[str, AxiomDefinition] = {}
         self.errors: List[str] = []
@@ -59,6 +65,8 @@ class Validator:
                 else:
                     t = self.normalize_comparison(item.left_type, item.operator, item.right_type)
                 self.operations[t] = (item.return_type, item.body, item.attributes, item.witnesses)
+            elif kind == 'function':
+                self.functions[item.name] = (item.args, item.body, item.return_type, item.attributes)
             elif kind == 'type':
                 self.types[item[0]] = item
                 # name of type, aliases, accepts, matches
@@ -332,14 +340,20 @@ class Validator:
             return ('equality', left, right)
         return None
 
-    def call_extern(self, extern_name: str, left_value, right_value, line, ret_type):
+    def call_extern(self, extern_name, left_value, right_value, line, ret_type, l_type=None, r_type=None):
         """Call an external function by name"""
         if extern_name in externs:
             extern_func = externs[extern_name]
-            if left_value == 'true': left_value = True
-            elif left_value == 'false': left_value = False
-            if right_value == 'true': right_value = True
-            elif right_value == 'false': right_value = False
+            if l_type == 'Bool':
+                if left_value == 'true':
+                    left_value = True
+                elif left_value == 'false':
+                    left_value = False
+            if r_type == 'Bool':
+                if right_value == 'true':
+                    right_value = True
+                elif right_value == 'false':
+                    right_value = False
 
             if left_value is None:
                 res = extern_func(right_value)
@@ -449,6 +463,25 @@ class Validator:
 
         return result
 
+    def _call_funct(self, funct_def, bindings,  line=0):
+        self.call_stack.append(f"function '{funct_def[0] or 'unknown'}' (line {line})")
+        self.call_depth += 1
+        if self.call_depth > self.max_call_depth:
+            self.call_depth = 0
+            cprint(self._err(line, f"Recursion limit exceeded ({self.max_call_depth})"), 'dr')
+            sys.exit(1)
+
+        new_frame = self.scope_stack[0] | (bindings or {})
+        self.scope_stack.append(new_frame)
+
+        try:
+            result = self._execute_block(funct_def[1])
+        finally:
+            self.call_depth -= 1
+            self.call_stack.pop()
+            self.scope_stack.pop()
+
+        return result
     def canonicalize_expression(self, expr):
         if type(expr) == Expression:
             left = self.canonicalize_expression(expr.left)
@@ -535,6 +568,25 @@ class Validator:
 
         expr = expression
         operator = expression.operator
+
+        if operator == 'CALL':
+            if left[1] not in self.functions:
+                if left[1] not in self.types:
+                    self.errors.append(self._err(expr.line, f"Undefined function '{left[1]}'"))
+                    return None
+                else:
+                    evaluated = self.solve_expression(right[0])
+                    result = self._cast(evaluated[1], evaluated[0], left[1], expr.line)
+                    return result
+            args = self.functions[left[1]][0]
+            if len(right) != len(args):
+                self.errors.append(self._err(expr.line, f"Function '{left[1]}' expected {len(args)} argument(s), got {len(right)} argument(s)"))
+                return None
+
+            funct_def = self.functions.get(left[1])
+            bindings = dict(zip(args, [self.solve_expression(a) for a in right]))
+            result = self._call_funct(funct_def, bindings, line=expr.line)
+            return result
 
         if operator == 'ASSIGN' and isinstance(left, Expression) and left.operator == 'FIELDACCESS':
             tuple_name = left.left[1]
@@ -653,7 +705,7 @@ class Validator:
 
             if op_def[2]:
                 extern_name = op_def[2]['extern'][0]
-                return self.call_extern(extern_name, None, x_value, expr.line, op_def[0])
+                return self.call_extern(extern_name, None, x_value, expr.line, op_def[0], x_type)
             else:
                 if expr.witness:
                     witness_val = self.solve_expression(expr.witness)
@@ -823,31 +875,37 @@ class Validator:
             else:
                 self.errors.append(self._err(expr.line, f"Cannot assign to literal '{left[1]}'"))
                 return None
-        elif operator == 'EQUALS':
+        elif operator in ('EQUALS', 'INEQUALS'):
+            flip = operator == 'INEQUALS'
+
             if isinstance(left_value, Expression) and isinstance(right_value, Expression):
-                return ('Bool', 'true') if self.expressions_equal(left_value, right_value) else ('Bool', 'false')
+                return _maybe_flip(
+                    ('Bool', 'true') if self.expressions_equal(left_value, right_value) else ('Bool', 'false'),
+                    flip)
 
             if isinstance(left_value, Expression) or isinstance(right_value, Expression):
                 return None
 
             if l_type == 'special_type_pool' and r_type == 'special_type_pool':
-                return ('Bool', 'true') if left_value == right_value else ('Bool', 'false')
+                return _maybe_flip(('Bool', 'true') if left_value == right_value else ('Bool', 'false'), flip)
+
             t = self.normalize_comparison(l_type, operator, r_type)
             op_def = self.operations.get(t)
             if op_def is None:
                 if l_type == r_type:
-                    return self.call_extern('eq_comp', left_value, right_value, expr.line, 'Bool')
+                    return _maybe_flip(
+                        self.call_extern('eq_comp', left_value, right_value, expr.line, 'Bool', l_type, r_type),
+                        flip)
                 else:
                     self.errors.append(
                         self._err(expr.line, f"Operator {operator} is not defined for {l_type} and {r_type}"))
                     return None
-
             else:
                 result = self._call_op(op_def, {'first': [l_type, left_value], 'second': [r_type, right_value]},
                                        line=expr.line)
-                if result is None:
-                    return None
-                return result
+                if operator == 'INEQUALS':
+                    return result
+                return _maybe_flip(result, flip)
         elif operator == 'INDEXACCESS':
             if self._resolve_base_type(l_type) != 'Tuple':
                 self.errors.append(self._err(expr.line, f"Can't access index of object of type {l_type}."))
@@ -912,7 +970,7 @@ class Validator:
 
                 if op_def[2]:
                     extern_name = op_def[2]['extern'][0]
-                    return self.call_extern(extern_name, left_value, right_value, expr.line, op_def[0])
+                    return self.call_extern(extern_name, left_value, right_value, expr.line, op_def[0], l_type, r_type)
                 else:
                     result = self._call_op(op_def, {'first': [l_type, left_value], 'second': [r_type, right_value]},
                                            line=expr.line)

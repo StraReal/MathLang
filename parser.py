@@ -96,13 +96,14 @@ class Parser:
                 if op.left_type is None:
                     if op.operator not in OP_MAP:
                         OP_MAP[op.operator] = Operator(op.operator, prefix=HIGHEST_IMPORTANCE)
-                    self.operations[(op.operator, op.right_type)] = (op.return_type, op.body, op.attributes)
                 else:
                     if op.operator not in OP_MAP:
                         OP_MAP[op.operator] = Operator(op.operator, infix=(HIGHEST_IMPORTANCE, True))
-                    self.operations[(op.left_type, op.operator, op.right_type)] = (op.return_type, op.body,
-                                                                                   op.attributes)
                 ordered.append(('operation', op))
+
+            elif self.current().type == 'FUNCTION':
+                funct = self.parse_function()
+                ordered.append(('function', funct))
 
             elif self.current().type == 'TYPE':
                 td = self.parse_type()
@@ -330,6 +331,83 @@ class Parser:
         )
         return o
 
+    def parse_function(self):
+        self.advance()  # skip 'function'
+
+        first = self.current()
+        self.advance()
+
+        name = first.value
+        args=[]
+
+        if self.current().type != 'LPAR':
+            print_error(self.current().line_num,
+                        f"Expected parentheses after function definition. Found: {self.current().value}", self.import_map)
+
+        self.advance()
+        while self.current().type == 'VARIABLE':
+            args.append(self.current().value)
+            self.advance()
+            if self.current().type != 'COMMA':
+                break
+            self.advance()
+
+        if self.current().type != 'RPAR':
+            print_error(self.current().line_num,
+                        f"Expected closing parentheses after function definition. Found: {self.current().value}",
+                        self.import_map)
+        self.advance()
+        if self.current().type != 'COLON':
+            print_error(self.current().line_num,
+                        f"Expected colon after function definition. Found: {self.current().value}", self.import_map)
+        self.advance()
+        return_type = None
+        if self.current().type == 'ARROW_TYPE':
+            self.advance()
+            return_type = self.current().value
+            self.advance()
+
+
+        body = []
+        witnesses = []
+        self.advance()
+        if self.current().type == 'INDENT':
+            self.advance()
+            while self.current().type != 'DEDENT':
+                if self.current().type == 'WITNESS':
+                    if return_type != "Bool":
+                        print_error(self.current().line_num, f"Witnesses are only allowed in operations with a Bool return type. Found: {return_type}", self.import_map)
+                    self.advance()
+                    var_name = self.current().value
+                    self.advance()
+                    if self.current().type == 'BE':
+                        self.advance()
+                        var_type = self.current().value
+                        self.advance()
+                        self.advance()
+                        expr = self.expr()
+                        witnesses.append(('inductive', var_name, var_type, expr))
+                    elif self.current().type == 'EQUALS' or self.current().type == 'ASSIGN':
+                        self.advance()
+                        expr = self.expr()
+                        witnesses.append(('base', var_name, expr))
+                else:
+                    case = self.parse_statement()
+                    body.extend(case)
+            self.advance()
+
+        attributes = self.pending_attributes
+        self.pending_attributes = {}
+
+        o = FunctionDefinition(
+            name=name,
+            args=args,
+            return_type=return_type,
+            body=body,
+            attributes=attributes,
+        )
+        return o
+
     def parse_type(self):
         self.advance()  # skip 'type'
 
@@ -441,8 +519,23 @@ class Parser:
             self.advance()
             return Expression(value, self.expr(OP_MAP[value].prefix), 'none_for_unary', witness=None, line=self.current().line_num)
 
+
         elif val_type == 'VARIABLE':
             self.advance()
+            # check for function call
+            if self.current().type == 'LPAR':
+                self.advance()
+                call_args = []
+                if self.current().type != 'RPAR':
+                    call_args.append(self.expr(-1))
+                    while self.current().type == 'COMMA':
+                        self.advance()
+                        call_args.append(self.expr(-1))
+                if self.current().type != 'RPAR':
+                    print_error(tok.line_num, f"Expected closing ')', found '{self.current().value}'", self.import_map)
+                    sys.exit(1)
+                self.advance()
+                return Expression('CALL', ('VARIABLE', value), call_args, witness=None, line=tok.line_num)
             return 'VARIABLE', value
 
         elif val_type == 'LPAR':

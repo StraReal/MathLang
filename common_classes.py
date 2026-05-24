@@ -13,6 +13,14 @@ class OperationDefinition:
     witnesses: list
     attributes: dict
 
+@dataclass
+class FunctionDefinition:
+    name: str
+    args: list[str]
+    return_type: str
+    body: list
+    attributes: dict
+
 @dataclass(slots=True, frozen=True)
 class Operator:
     symbol: str

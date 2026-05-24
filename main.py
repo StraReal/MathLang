@@ -43,6 +43,7 @@ simple_keywords = { #require space or end
     'into': 'INTO',
     'error': 'ERROR',
     'for': 'FOR',
+    'function': 'FUNCTION',
 }
 
 colon_keywords = {
@@ -158,6 +159,8 @@ def tokenize(code: str, import_map: dict) -> List[Token]:
         for i, ch in enumerate(line):
             if ch == '"':
                 in_string = not in_string
+            elif ch == "'":
+                in_string = not in_string
             elif ch == '#' and not in_string:
                 line = line[:i]
                 break
@@ -206,8 +209,6 @@ def tokenize(code: str, import_map: dict) -> List[Token]:
                         pos += len(keyword)
                         matched = True
                         break
-                    if not (line[end_pos].isspace() or line[end_pos] == ')'):
-                        continue
                     if token_type[2]:
                         tokens.append(Token(token_type[0], token_type[1](keyword), line_num, line))
                     else:
@@ -305,20 +306,22 @@ def tokenize(code: str, import_map: dict) -> List[Token]:
                     tokens.append(Token('VARIABLE', word, line_num, line))
                 continue
 
-            elif line[pos] == '"':
-                string = '"'
+
+            elif line[pos] in ('"', "'"):
+                quote_char = line[pos]
+                string = ''
                 closed = False
                 pos += 1
                 while pos < len(line):
-                    string += line[pos]
-                    if line[pos] == '"':
+                    if line[pos] == quote_char:
                         closed = True
                         break
+                    string += line[pos]
                     pos += 1
                 if not closed:
-                    print_error(line_num, f"Syntax Error: Unclosed quotes.",import_map)
+                    print_error(line_num, f"Syntax Error: Unclosed quotes.", import_map)
                     sys.exit(1)
-                tokens.append(Token('LITSTR', string.strip('"'), line_num, line))
+                tokens.append(Token('LITSTR', string, line_num, line))
                 pos += 1
                 continue
 
