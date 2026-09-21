@@ -1,5 +1,7 @@
 from parser import *
 from validator import *
+import os
+import sys
 
 debug = False
 simple_keywords = { #require space or end
@@ -18,6 +20,7 @@ simple_keywords = { #require space or end
     'theorem': 'THEOREM',
     'operation': 'OPERATION',
     'type': 'TYPE',
+    'recordType': 'RECORDTYPE',
     'tuple': 'TUPLE',
     'alias': 'ALIAS',
     'matches': 'MATCHES',
@@ -44,6 +47,7 @@ simple_keywords = { #require space or end
     'error': 'ERROR',
     'for': 'FOR',
     'function': 'FUNCTION',
+    'record': 'RECORD'
 }
 
 colon_keywords = {
@@ -61,6 +65,7 @@ nonwhitespace_keywords = {
     '(': 'LPAR',
     ')': 'RPAR',
     ',': 'COMMA',
+    ';': 'SEMICOLON',
     ':': 'COLON',
     '=>': 'CONCL_ARROW',
     '->': 'ARROW_TYPE',
@@ -82,7 +87,8 @@ operators = {
     '!=': 'INEQUALS',
     "%" : 'PERCENT',
     "'s ": 'FIELDACCESS',
-    '% of ': 'PERCENTOF'
+    "% of ": 'PERCENTOF',
+    "...": 'FROMTO',
 }
 
 literals = {
@@ -364,65 +370,81 @@ def tokenize(code: str, import_map: dict) -> List[Token]:
     tokens.append(Token('EOF', '', len(lines), ''))
     return tokens
 
-filename = 'statement.math'
-code = load_file(filename)
+def run_file(filename):
+    filename = os.path.abspath(filename)
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    code = load_file(filename)
 
-imported = []
-import_map = {}  # Maps line_number -> (filename, original_line_in_file)
+    imported = []
+    file_tracker = [(filename, i + 1) for i in range(len(code.split('\n')))]
 
-original_lines = code.split('\n')
-for i, line in enumerate(original_lines, start=1):
-    import_map[i] = (filename, i)
+    while True:
+        import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
+        check_balanced(code, import_map)
+        tokens = tokenize(code, import_map)
+        parser = Parser(tokens, import_map)
+        axioms, theorems, hypothesis, proofs, to_import, ordered = parser.parse()
 
-original_lines = code.split('\n')
-file_tracker = [(filename, i + 1) for i in range(len(code.split('\n')))]
-import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
+        if not to_import:
+            break
 
-while True:
-    import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
-    check_balanced(code, import_map)
-    tokens = tokenize(code, import_map)
-    parser = Parser(tokens, import_map)
-    axioms, theorems, hypothesis, proofs, to_import, ordered = parser.parse()
+        import_line = to_import[1]
+        import_name = to_import[0]
+        if import_name in imported:
+            break
 
-    if not to_import:
-        break
-
-    import_line = to_import[1]
-
-    if to_import[0] not in imported:
-        imported.append(to_import[0])
-        imported_lines = load_file(f'imports/{to_import[0]}.math').split('\n')
+        imported.append(import_name)
+        imported_filename = os.path.join(project_dir, 'imports', f'{import_name}.math')
+        imported_lines = load_file(imported_filename).split('\n')
 
         lines = code.split('\n')
         del lines[import_line - 1]
         del file_tracker[import_line - 1]
-
         for i, line in enumerate(imported_lines):
             lines.insert(import_line - 1 + i, line)
-            file_tracker.insert(import_line - 1 + i, (f"{to_import[0]}.math", i + 1))
-
+            file_tracker.insert(import_line - 1 + i, (imported_filename, i + 1))
         code = '\n'.join(lines)
 
-import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
+    import_map = {i + 1: file_tracker[i] for i in range(len(file_tracker))}
+    validator = Validator(import_map)
+    validator.validate(axioms, hypothesis, ordered, proofs)
 
-validator = Validator(import_map)
-validator.validate(axioms, hypothesis, ordered, proofs)
+    if debug:
+        print("=== Axioms ===")
+        for name, axiom in axioms.items():
+            print(f"  {name}: {len(axiom.given)} hypothesis statements")
+        print("=== Parsed ===")
+        if hypothesis:
+            print(f"Hypothesis: {len(hypothesis)} statements")
+        print(f"Proofs: {len(proofs)} statements")
 
-if debug:
-    print("=== Axioms ===")
-    for name, axiom in axioms.items():
-        print(f"  {name}: {len(axiom.given)} hypothesis statements")
+    if validator.errors:
+        cprint("\n=== Validation ===", 'r')
+        for error in validator.errors:
+            cprint(f"Error: {error}", 'dr')
+        return 1
 
-    print("=== Parsed ===")
-    if hypothesis:
-        print(f"Hypothesis: {len(hypothesis)} statements")
-    print(f"Proofs: {len(proofs)} statements")
-
-if validator.errors:
-    cprint("\n=== Validation ===", 'r')
-    for error in validator.errors:
-        cprint(f"Error: {error}", 'dr')
-else:
     cprint("\n=== Validation ===", 'dc')
     cprint("All returned valid", 'c')
+    return 0
+
+
+def main():
+    arguments = sys.argv[1:]
+    if len(arguments) >= 2 and arguments[0].startswith('-') and arguments[1] == '.math':
+        filename = f'{arguments[0]}.math'
+    else:
+        filename = arguments[0] if arguments else 'statement.math'
+    if filename.startswith('-') and filename.endswith('.math'):
+        filename = filename[1:]
+    if not filename.endswith('.math'):
+        print("Usage: mathRun [-]file.math")
+        return 2
+    if not os.path.isfile(filename):
+        print(f"Error: MathLang file '{filename}' was not found")
+        return 2
+    return run_file(filename)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -1,22 +1,23 @@
 from common_classes import *
 
 attributes = {}
-HIGHEST_IMPORTANCE = 10 # 1 above the highest defined precedence
+HIGHEST_IMPORTANCE = 11 # 1 above the highest defined precedence
 OP_MAP = {  # Use https://docs.python.org/3/reference/expressions.html#operator-precedence for reference
             # TOKEN TYPE |      SYMBOL     | INFIX PREC,LEFT-ASS |  PREFIX PREC   | POSTFIX PREC | DISTFIX (closed) PREC
-            'LBRACKET':   Operator("[",                                                           distfix=("]", 12, True, "INDEXACCESS")),
-            'FIELDACCESS':Operator("'s ",    infix=(12,True)),
-            'PERCENT':    Operator('%',                                             postfix=10),
-            'FACTORIAL':  Operator('!',                                             postfix=10),
-            'EXPONENT':   Operator('^',      infix=(9, True)),
-            'MULTIPLY':   Operator('*',      infix=(7, True)),
-            'MODULO':     Operator('mod',    infix=(7, True)),
-            'INT_DIV':    Operator('div',    infix=(7, True)),
-            'DIVIDE':     Operator('/',      infix=(7, True)),
-            'PERCENTOF':  Operator('% of ',  infix=(7, True)),
-            'PLUS':       Operator('+',      infix=(6, True)),
-            'MINUS':      Operator('-',      infix=(6, True) ,        prefix=8),
-            'INTO':       Operator('into',   infix=(6, True)),
+            'LBRACKET':   Operator("[",                                                           distfix=("]", 13, True, "INDEXACCESS")),
+            'FIELDACCESS':Operator("'s ",    infix=(13,True)),
+            'PERCENT':    Operator('%',                                             postfix=11),
+            'FACTORIAL':  Operator('!',                                             postfix=11),
+            'EXPONENT':   Operator('^',      infix=(10, True)),
+            'MULTIPLY':   Operator('*',      infix=(8, True)),
+            'MODULO':     Operator('mod',    infix=(8, True)),
+            'INT_DIV':    Operator('div',    infix=(8, True)),
+            'DIVIDE':     Operator('/',      infix=(8, True)),
+            'PERCENTOF':  Operator('% of ',  infix=(8, True)),
+            'PLUS':       Operator('+',      infix=(7, True)),
+            'MINUS':      Operator('-',      infix=(7, True) ,        prefix=9),
+            'INTO':       Operator('into',   infix=(7, True)),
+            'FROMTO':     Operator('...',    infix=(6, True)),
             'INEQUALS':   Operator('!=',     infix=(5, True)),
             'IN':         Operator('in',     infix=(5, True)),
             'EQUALS':     Operator('equals', infix=(5, True)),
@@ -63,7 +64,7 @@ class Parser:
         hypothesis = []
         hypothesis_to_append = []
         proofs = []
-        ordered : List[tuple[str, Any]] = [('type', ['Type', [], [], []]),]
+        ordered : List[tuple[str, FunctionDefinition|tuple]] = [('type', (FunctionDefinition(name='Type', args=[], return_type='Type', attributes={}, body=[]), False))]
 
         hypothesis_to_append.append(Statement('let', [('VARIABLE', 'Type')], value=('Type', 'Type'), line=self.current().line_num))
         hypothesis_to_append.append(Statement('typehint', ['Type', 'Type'], line=self.current().line_num))
@@ -106,11 +107,11 @@ class Parser:
                 ordered.append(('function', funct))
 
             elif self.current().type == 'TYPE':
-                td = self.parse_type()
-                self.types.append(td[0])
-                hypothesis_to_append.append(Statement('let', [('VARIABLE', td[0])], value=('Type', td[0]), line=self.current().line_num))
-                hypothesis_to_append.append(Statement('typehint', [td[0], 'Type'], line=self.current().line_num))
-                ordered.append(('type', td)) # name, aliases, accepts, matches, witnesses
+                td, is_record = self.parse_type()
+                self.types.append(td.name)
+                hypothesis_to_append.append(Statement('let', [('VARIABLE', td.name)], value=('Type', td.name), line=self.current().line_num))
+                hypothesis_to_append.append(Statement('typehint', [td.name, 'Type'], line=self.current().line_num))
+                ordered.append(('type', (td, is_record)))
             elif self.current().type == 'IMPORT':
                 self.advance()
                 if self.current().type == 'VARIABLE':
@@ -259,6 +260,7 @@ class Parser:
 
         first = self.current()
         self.advance()
+        specialization = None
 
         second = self.current()
         self.advance()
@@ -271,10 +273,16 @@ class Parser:
             else:
                 right_type = self.current().value
                 self.advance()
+                specialization = None
+                if self.current().type == 'SEMICOLON':
+                    self.advance()
+                    specialization = self.current().value
+                    self.advance()
         else:
             left_type = None
             operator = first.type if first.type in OP_MAP else first.value
             right_type = second.value
+            specialization = None
 
         return_type = None
         if self.current().type == 'ARROW_TYPE':
@@ -320,6 +328,9 @@ class Parser:
         attributes = self.pending_attributes
         self.pending_attributes = {}
 
+        if specialization is not None:
+            attributes['specialized_type'] = specialization
+
         o = OperationDefinition(
             left_type=left_type,
             operator=operator,
@@ -345,9 +356,19 @@ class Parser:
                         f"Expected parentheses after function definition. Found: {self.current().value}", self.import_map)
 
         self.advance()
+        saw_default = False
         while self.current().type == 'VARIABLE':
-            args.append(self.current().value)
+            arg_name = self.current().value
             self.advance()
+            default = None
+            if self.current().type == 'ASSIGN':
+                self.advance()
+                default = self.expr()
+                saw_default = True
+            elif saw_default:
+                print_error(self.current().line_num,
+                            "Required parameters cannot follow parameters with defaults", self.import_map)
+            args.append((arg_name, default))
             if self.current().type != 'COMMA':
                 break
             self.advance()
@@ -411,33 +432,89 @@ class Parser:
     def parse_type(self):
         self.advance()  # skip 'type'
 
-        name = self.current().value
+        first = self.current()
+        is_record = False
         self.advance()
+        name = first.value
+        args=[]
+
+        if self.current().type != 'LPAR':
+            print_error(self.current().line_num,
+                        f"Expected parentheses after type definition. Found: {self.current().value}", self.import_map)
+
+        self.advance()
+        saw_default = False
+        while self.current().type == 'VARIABLE':
+            arg_name = self.current().value
+            self.advance()
+            default = None
+            if self.current().type == 'ASSIGN':
+                self.advance()
+                default = self.expr()
+                saw_default = True
+            elif saw_default:
+                print_error(self.current().line_num,
+                            "Required parameters cannot follow parameters with defaults", self.import_map)
+            args.append((arg_name, default))
+            if self.current().type != 'COMMA':
+                break
+            self.advance()
+        if self.current().type != 'RPAR':
+            print_error(self.current().line_num,
+                        f"Expected closing parentheses after type definition. Found: {self.current().value}",
+                        self.import_map)
+        self.advance()
+        if self.current().type != 'COLON':
+            print_error(self.current().line_num,
+                        f"Expected colon after type definition. Found: {self.current().value}", self.import_map)
         self.advance()
 
-        aliases = []
-        accepts = []
-        matches = []
-
+        body = []
+        witnesses = []
+        self.advance()
         if self.current().type == 'INDENT':
             self.advance()
             while self.current().type != 'DEDENT':
-                if self.current().type == 'ALIAS':
+                if self.current().type == 'RECORDTYPE':
+                    is_record = True
+                    self.advance()  # skip 'recordType'
+                    if self.current().type == 'NEWLINE':
+                        self.advance()
+                    continue
+                if self.current().type == 'WITNESS':
+                    if name != "Bool":
+                        print_error(self.current().line_num, f"Witnesses are only allowed in operations with a Bool return type. Found: {name}", self.import_map)
                     self.advance()
-                    aliases.append(self.current().value)
+                    var_name = self.current().value
                     self.advance()
-                elif self.current().type == 'ACCEPTS':
-                    self.advance()
-                    accepts.append(self.current().value)
-                    self.advance()
-                elif self.current().type == 'MATCHES':
-                    self.advance()
-                    matches.append(self.expr())
+                    if self.current().type == 'BE':
+                        self.advance()
+                        var_type = self.current().value
+                        self.advance()
+                        self.advance()
+                        expr = self.expr()
+                        witnesses.append(('inductive', var_name, var_type, expr))
+                    elif self.current().type == 'EQUALS' or self.current().type == 'ASSIGN':
+                        self.advance()
+                        expr = self.expr()
+                        witnesses.append(('base', var_name, expr))
                 else:
+                    case = self.parse_statement()
+                    body.extend(case)
+                if self.current().type != 'DEDENT':
                     self.advance()
-            self.advance()  # skip DEDENT
 
-        return name, aliases, accepts, matches
+        attributes = self.pending_attributes
+        self.pending_attributes = {}
+
+        o = FunctionDefinition(
+            name=name,
+            args=args,
+            return_type=name,
+            body=body,
+            attributes=attributes,
+        )
+        return o, is_record
 
     def expr(self, prev_prec=-1):
         left = self.atom()
@@ -621,7 +698,8 @@ class Parser:
                 statements.append(s)
 
             if type_annotation is not None:
-                statements.append(Statement('typehint', [name, type_annotation], line=line))
+                hint_target = left_expr if isinstance(left_expr, Expression) else name
+                statements.append(Statement('typehint', [hint_target, type_annotation], line=line))
             value = None
             if name_type == 'IDENT':
                 if self.current().type == 'ASSIGN':
@@ -675,28 +753,68 @@ class Parser:
                 else_block = self.parse_block()
             statements.append(Statement('if', [condition, then_block, else_block]))
 
+
         elif self.current().type == 'VARIABLE':
+
             if self.current().value not in OP_MAP:
-                self.regress()
-                if self.current().type in ('COLON', 'BE'):  # this is a type
-                    self.advance()  # var (self)
-                    make_operation = False
-                else:
+
+                expr = self.expr()  # parse the full lvalue: e's n, t[0], x, whatever
+
+                type_annotation = None
+
+                value = None
+
+                if self.current().type in ('BE', 'COLON'):
                     self.advance()
-                    make_operation = True
-                if make_operation:
-                    expr = self.expr()
-                    self.regress()
-                    l = self.current().line
+
+                    type_annotation = self.current().value
+
                     self.advance()
-                    s = Statement('expression', [expr, l.strip()], line=self.current().line_num)
+
+                if self.current().type == 'ASSIGN':
+                    self.advance()
+
+                    value = self.expr()
+
+                if type_annotation is not None or value is not None:
+
+                    # it was a declaration/assignment
+
+                    s = Statement('let', [expr], value=value, line=line)
+
                     statements.append(s)
+
+                    if type_annotation:
+                        statements.append(Statement('typehint', [expr, type_annotation], line=line))
+
+                else:
+
+                    # it was a plain expression statement
+
+                    self.regress()
+
+                    l = self.current().line
+
+                    self.advance()
+
+                    s = Statement('expression', [expr, l.strip()], line=self.current().line_num)
+
+                    statements.append(s)
+
             else:
+
+                # OP_MAP case, unchanged
+
                 expr = self.expr()
+
                 self.regress()
+
                 l = self.current().line
+
                 self.advance()
+
                 s = Statement('expression', [expr, l.strip()], line=self.current().line_num)
+
                 statements.append(s)
 
         elif self.current().type in OP_MAP or self.current().type == 'LPAR':

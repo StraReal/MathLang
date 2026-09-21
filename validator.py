@@ -28,12 +28,12 @@ class Validator:
         self.contradictory = False
         self.congruence_pools: Dict[int, Set[str]] = {}  # pool_id -> set of ident names
         self._next_pool_id: int = 1
-        self.aliases = {}
         self.facts = defaultdict(list)
         self.call_depth = 0
         self.call_stack = []
         self.scope_stack : List[Dict[str, [str, any]]] = [{}]
         self.max_call_depth = 100000
+        self.record_type : Dict[str, bool] = {}
         sys.setrecursionlimit((2**31)-1)
 
 
@@ -65,13 +65,12 @@ class Validator:
                 else:
                     t = self.normalize_comparison(item.left_type, item.operator, item.right_type)
                 self.operations[t] = (item.return_type, item.body, item.attributes, item.witnesses)
+                if item.left_type is not None and item.operator == 'into' and item.right_type == 'Type':
+                    self.operations[(item.left_type, 'into', 'Type')] = (item.return_type, item.body, item.attributes, item.witnesses)
             elif kind == 'function':
                 self.functions[item.name] = (item.args, item.body, item.return_type, item.attributes)
             elif kind == 'type':
-                self.types[item[0]] = item
-                # name of type, aliases, accepts, matches
-                for alias in item[1]:
-                    self.aliases[alias] = item[0]
+                self.types[item[0].name] = item
 
         if hypothesis:
             for stmt in hypothesis:
@@ -404,12 +403,70 @@ class Validator:
             if type_name in seen:
                 break  # circular, bail
             seen.add(type_name)
-            t = self.types[type_name]
-            accepts = t[2]
+
+            entry = self.types[type_name]
+            if not isinstance(entry, tuple) or len(entry) < 2:
+                break
+
+            type_def = entry[0]
+            accepts = getattr(type_def, 'attributes', {}).get('accepts')
             if not accepts:
                 break
-            type_name = accepts[0]
+            if isinstance(accepts, (list, tuple)) and accepts:
+                type_name = accepts[0]
+                continue
+            break
         return type_name
+
+    def _infer_literal_type(self, value):
+        if isinstance(value, bool):
+            return 'Bool'
+        if isinstance(value, int) and not isinstance(value, bool):
+            return 'Int'
+        if isinstance(value, str):
+            return 'Str'
+        return None
+
+    def _parameter_parts(self, parameter):
+        if isinstance(parameter, tuple) and len(parameter) == 2:
+            return parameter
+        return parameter, None
+
+    def _bind_parameters(self, parameters, provided, line, label):
+        if len(provided) > len(parameters):
+            self.errors.append(self._err(
+                line,
+                f"{label} expected at most {len(parameters)} argument(s), got {len(provided)} argument(s)"
+            ))
+            return None
+
+        bindings = {}
+        original_scope = self.scope_stack[-1].copy()
+        try:
+            for index, parameter in enumerate(parameters):
+                name, default = self._parameter_parts(parameter)
+                if index < len(provided):
+                    bindings[name] = provided[index]
+                elif default is not None:
+                    bindings[name] = self.solve_expression(default)
+                    if bindings[name] is None:
+                        return None
+                else:
+                    self.errors.append(self._err(
+                        line,
+                        f"{label} missing required argument '{name}'"
+                    ))
+                    return None
+
+                bound = bindings[name]
+                if isinstance(bound, (tuple, list)) and len(bound) == 2:
+                    self.scope_stack[-1][name] = [bound[0], bound[1]]
+                else:
+                    self.scope_stack[-1][name] = [self._infer_literal_type(bound), bound]
+            return bindings
+        finally:
+            self.scope_stack[-1].clear()
+            self.scope_stack[-1].update(original_scope)
 
     def _call_op(self, op_def, bindings, witnessed=False, line=0):
         self.call_stack.append(f"operation '{op_def[0] or 'unknown'}' (line {line})")
@@ -527,7 +584,9 @@ class Validator:
             if ex_type == 'VARIABLE':
                 var = self.scope_stack[-1].get(val)
                 if var is not None:
-                    if var[1] is not None and var[0] is not None:
+                    if var[0] is not None:
+                        if var[1] is None:
+                            return var[0], None
                         return self.solve_expression(expression=(var[0], var[1]))
                 return 'VARIABLE', val
             if ex_type == 'TUPLE':
@@ -578,13 +637,12 @@ class Validator:
                     evaluated = self.solve_expression(right[0])
                     result = self._cast(evaluated[1], evaluated[0], left[1], expr.line)
                     return result
-            args = self.functions[left[1]][0]
-            if len(right) != len(args):
-                self.errors.append(self._err(expr.line, f"Function '{left[1]}' expected {len(args)} argument(s), got {len(right)} argument(s)"))
-                return None
-
             funct_def = self.functions.get(left[1])
-            bindings = dict(zip(args, [self.solve_expression(a) for a in right]))
+            args = funct_def[0]
+            provided = [self.solve_expression(a) for a in right]
+            bindings = self._bind_parameters(args, provided, expr.line, f"Function '{left[1]}'")
+            if bindings is None:
+                return None
             result = self._call_funct(funct_def, bindings, line=expr.line)
             return result
 
@@ -650,12 +708,12 @@ class Validator:
         if type(right) == Expression:
             right = self.solve_expression(right)
 
-        if type(left) == tuple and left[0]=='VARIABLE':
+        if operator not in ('FIELDACCESS', 'INDEXACCESS') and type(left) == tuple and left[0] == 'VARIABLE':
             left = self.solve_expression(left)
             if isinstance(left, tuple) and left[0] == 'VARIABLE':
                 expression.left = left
 
-        if type(right) == tuple and right[0]=='VARIABLE':
+        if operator not in ('FIELDACCESS', 'INDEXACCESS') and type(right) == tuple and right[0] == 'VARIABLE':
             right = self.solve_expression(right)
             if isinstance(right, tuple) and right[0] == 'VARIABLE':
                 expression.right = right
@@ -724,6 +782,16 @@ class Validator:
                         return None
                     return result
 
+        if not isinstance(left, tuple) or len(left) != 2:
+            self.errors.append(self._err(expr.line, f"Malformed left operand in expression: {left!r}"))
+            return None
+        if not isinstance(right, tuple) or len(right) != 2:
+            self.errors.append(self._err(expr.line, f"Malformed right operand in expression: {right!r}"))
+            return None
+        if left[0] is None or right[0] is None:
+            self.errors.append(self._err(expr.line, f"Operand without a type was encountered: left={left!r}, right={right!r}"))
+            return None
+
         if left[0] == 'VARIABLE':
             is_ident = left[1].isupper()
             is_angle = left[1].startswith('ang') and left[1][3:].isupper() and len(left[1]) > 3
@@ -777,27 +845,39 @@ class Validator:
 
         if right[0] == 'VARIABLE':
             if operator == 'FIELDACCESS':
-                if l_type != 'Namedtuple':
+                if not self.types[l_type][1]:
                     self.errors.append(self._err(expr.line, f"Can't access field of object of type {l_type}."))
                     return None
                 field = left_value.get(right[1])
                 if field is None:
                     self.errors.append(self._err(expr.line, f"Can't access field '{right[1]}' of object '{left[1]}'."))
                     return None
+                if isinstance(field, list) and len(field) == 2 and field[0] is None and isinstance(field[1], Expression):
+                    solved = self.solve_expression(field[1])
+                    if solved is not None:
+                        return solved
+                if isinstance(field, list) and len(field) == 2 and field[0] is None and isinstance(field[1], tuple):
+                    return self.solve_expression(field[1]) or (field[1][0], field[1][1])
                 return (field[0], field[1])
             elif operator == 'INDEXACCESS':
-                if self._resolve_base_type(l_type) != 'Tuple':
-                    self.errors.append(self._err(expr.line, f"Can't access index of object of type {l_type}."))
+                base_type = self._resolve_base_type(l_type)
+                if base_type == 'Dict':
+                    key = right[1]
+                    field = left_value.get(key)
+                    if field is None:
+                        self.errors.append(self._err(expr.line, f"Key '{key}' not found in dict."))
+                        return None
+                    return (field[0], field[1])
+                elif base_type == 'Tuple':
+                    index = right[1] - 1
+                    if index < 0 or index >= len(left_value):
+                        self.errors.append(self._err(expr.line, f"Index {right[1]} out of range."))
+                        return None
+                    element = left_value[index]
+                    return (element[0], element[1])
+                else:
+                    self.errors.append(self._err(expr.line, f"Can't index into type {l_type}."))
                     return None
-                index = right[1] - 1
-                if index < 0 or index >= len(left_value):
-                    self.errors.append(self._err(expr.line, f"Index {right[1]} out of range for '{left[1]}'."))
-                    return None
-                element = left_value[index]
-                if element is None:
-                    self.errors.append(self._err(expr.line, f"Can't access index {right[1]} of '{left[1]}'."))
-                    return None
-                return (element[0], element[1])
             else:
                 is_ident = right[1].isupper()
                 is_angle = right[1].startswith('ang') and right[1][3:].isupper() and len(right[1]) > 3
@@ -854,9 +934,6 @@ class Validator:
                 self.errors.append(self._err(expr.line, f"Cannot assign to literal '{left[1]}'"))
                 return None
 
-            if not self.check_match(l_type, r_type, right_value, expr.line):
-                self.errors.append(self._err(expr.line, f"Value does not match constraints for type {l_type}"))
-                return None
             left_name = left[1]
 
             if left[0] == 'VARIABLE' and isinstance(self.scope_stack[-1][left_name][1], dict) and '_congruence' in self.scope_stack[-1][left_name][1]:
@@ -981,34 +1058,6 @@ class Validator:
                         return None
                     return result
 
-    def check_match(self, type_name, value_type, value, line):
-        type_info = self.types.get(type_name)
-        if type_info is None:
-            return True
-
-        matches = type_info[3]
-        if not matches:
-            return True
-
-        accepted_type = value_type
-        accepts = type_info[2]
-        if value_type == type_name and accepts:
-            accepted_type = accepts[0]
-
-        for match_expr in matches:
-            if accepted_type is None:
-                return False  # can't match against unknown type
-            self.scope_stack[-1]['self'] = [accepted_type, value]
-            try:
-                result = self.solve_expression(match_expr)
-            finally:
-                self.scope_stack[-1].pop('self', None)
-
-            if result is None or result[1] != 'true':
-                return False
-
-        return True
-
     def _create_ident(self, name: str) -> list:
         name = self.normalize_object(name)
         if name.startswith('ang'):
@@ -1043,9 +1092,101 @@ class Validator:
     def _cast(self, value, from_type, to_type, line):
         # 0. identity
         if from_type == to_type:
-            return [to_type, value]
+            return (to_type, value)
 
-        # 1. structural promotion
+        # 1. Construct user-defined record types from positional tuple values.
+        #    This is the canonical conversion path: the type definition body acts as
+        #    the target type's __init__ method, so custom conversions no longer need
+        #    a separate operation for every source type.
+        if to_type in self.types:
+            type_entry = self.types[to_type]
+            if isinstance(type_entry, tuple) and len(type_entry) >= 2:
+                type_definition = type_entry[0]
+                if hasattr(type_definition, 'args') and hasattr(type_definition, 'body') and getattr(type_definition, 'args', None):
+                    source_values = value if isinstance(value, (list, tuple)) else [value]
+                    if not isinstance(source_values, list):
+                        source_values = list(source_values)
+                    fields = {}
+                    pending_types = {}
+                    constructor_scope = self.scope_stack[-1].copy()
+                    try:
+                        arguments = self._bind_parameters(
+                            type_definition.args,
+                            source_values,
+                            line,
+                            f"Type '{to_type}'"
+                        )
+                        if arguments is None:
+                            return None
+                        for arg_name, arg_value in arguments.items():
+                            if isinstance(arg_value, tuple) and len(arg_value) == 2 and arg_value[0] == 'VARIABLE':
+                                bound = self.scope_stack[-1].get(arg_value[1])
+                                if bound is not None:
+                                    self.scope_stack[-1][arg_name] = [bound[0], bound[1]]
+                                else:
+                                    self.scope_stack[-1][arg_name] = [arg_value[0], arg_value[1]]
+                            elif isinstance(arg_value, (bool, int, str)):
+                                self.scope_stack[-1][arg_name] = [self._infer_literal_type(arg_value), arg_value]
+                            elif isinstance(arg_value, tuple) and len(arg_value) == 2:
+                                if arg_value[0].upper().startswith('LIT'):
+                                    self.scope_stack[-1][arg_name] = [arg_value[0][3:].capitalize(), arg_value[1]]
+                                else:
+                                    self.scope_stack[-1][arg_name] = [arg_value[0], arg_value[1]]
+                            elif isinstance(arg_value, list) and len(arg_value) == 2:
+                                self.scope_stack[-1][arg_name] = [arg_value[0], arg_value[1]]
+                            elif isinstance(arg_value, Expression):
+                                solved = self.solve_expression(arg_value)
+                                if solved is not None:
+                                    self.scope_stack[-1][arg_name] = [solved[0], solved[1]]
+                                else:
+                                    self.scope_stack[-1][arg_name] = [None, arg_value]
+                            else:
+                                self.scope_stack[-1][arg_name] = [None, arg_value]
+
+                        for statement in type_definition.body:
+                            if statement.type == 'typehint' and isinstance(statement.objects[0], Expression):
+                                target = statement.objects[0]
+                                if target.operator == 'FIELDACCESS' and target.left == ('VARIABLE', 'self'):
+                                    pending_types[target.right[1]] = statement.objects[1]
+                            elif statement.type == 'let' and isinstance(statement.objects[0], Expression):
+                                target = statement.objects[0]
+                                if target.operator != 'FIELDACCESS' or target.left != ('VARIABLE', 'self'):
+                                    continue
+                                field_name = target.right[1]
+                                field_value = statement.value
+                                field_type = pending_types.get(field_name)
+                                if isinstance(field_value, Expression):
+                                    solved = self.solve_expression(field_value)
+                                    if solved is not None:
+                                        field_type, field_value = solved
+                                elif isinstance(field_value, (bool, int, str)):
+                                    if field_type is None:
+                                        field_type = self._infer_literal_type(field_value)
+                                else:
+                                    if isinstance(field_value, tuple) and field_value[0] == 'VARIABLE':
+                                        arg_value = self.scope_stack[-1].get(field_value[1])
+                                        if arg_value is not None:
+                                            field_type = arg_value[0] if field_type is None else field_type
+                                            field_value = arg_value[1]
+                                    elif isinstance(field_value, tuple) and len(field_value) == 2 and field_value[0] is None:
+                                        if field_type is None:
+                                            field_type = self._infer_literal_type(field_value[1])
+                                    elif isinstance(field_value, tuple) and len(field_value) == 2:
+                                        if field_value[0].upper().startswith('LIT'):
+                                            field_type = field_value[0][3:].capitalize()
+                                            field_value = field_value[1]
+                                        else:
+                                            field_type, field_value = field_value
+                                    elif isinstance(field_value, list) and len(field_value) == 2:
+                                        field_type, field_value = field_value
+                                fields[field_name] = [field_type, field_value]
+                    finally:
+                        self.scope_stack[-1].clear()
+                        self.scope_stack[-1].update(constructor_scope)
+
+                    return (to_type, fields)
+
+        # 2. structural promotion
         if isinstance(value, list):
             resolved = []
             for elem in value:
@@ -1065,14 +1206,6 @@ class Validator:
                     resolved.append(elem)
             value = resolved
 
-        # 2. check type's accepts field
-        if to_type in self.types:
-            t = self.types[to_type]
-            accepts = t[2] if isinstance(t, tuple) else t.get('accepts')
-            if from_type in accepts or self._resolve_base_type(from_type) in accepts:
-                match_result = self.check_match(to_type, from_type, value, line)
-                if match_result:
-                    return [to_type, value]
 
         # 3. save scope, inject type names
         for name in self.types:
@@ -1089,22 +1222,45 @@ class Validator:
         op_def = self.operations.get(t)
 
         if op_def is not None:
-            if op_def[2]:
+            if op_def[2] and 'extern' in op_def[2]:
                 extern_name = op_def[2]['extern'][0]
                 result = self.call_extern(extern_name, None, from_type, line, op_def[0])
             else:
                 result = self._call_op(op_def, args, line=line)
             if result is not None:
-                return [to_type, result[1]]
+                return (to_type, result[1])
+
+        specific_key = (from_type, 'into', to_type)
+        op_def = self.operations.get(specific_key)
+        if op_def is not None:
+            result = self._call_op(op_def, args, line=line)
+            if result is not None:
+                return (to_type, result[1])
 
         # 5. Any fallback
         op_def = self.operations.get(('into', 'Any'))
         if op_def is not None:
             result = self._call_op(op_def, args, line=line)
             if result is not None:
-                return [to_type, result[1]]
+                return (to_type, result[1])
 
         return None
+
+    def _resolve_field_access(self, expr: Expression):
+        """Given a field access Expression, return (dict_ref, field_name) or (None, None)."""
+        if expr.operator == 'FIELDACCESS':
+            obj_name = expr.left[1]
+            field_name = expr.right[1]
+            obj_ref = self.scope_stack[-1].get(obj_name)
+            if obj_ref is None:
+                return None, None
+            # obj is stored as [type, value]; value should be the dict
+            inner = obj_ref[1] if isinstance(obj_ref, list) else obj_ref
+            if not isinstance(inner, dict):
+                inner = {}
+                obj_ref[1] = inner
+            return inner, field_name
+        return None, None
 
     def process_statement(self, stmt: Statement, is_hypothesis: bool):
         self.call_stack.append(f"statement '{stmt.type}' (line {stmt.line})")
@@ -1124,6 +1280,21 @@ class Validator:
 
 
                 if isinstance(stmt_object, Expression):
+                    if stmt_object.operator == 'FIELDACCESS':
+                        obj_name = stmt_object.left[1]
+                        field_name = stmt_object.right[1]
+                        obj_ref = self.scope_stack[-1].get(obj_name)
+                        if obj_ref is None:
+                            self.errors.append(self._err(stmt.line, f"'{obj_name}' is not defined"))
+                            return
+                        if not isinstance(obj_ref[1], dict):
+                            obj_ref[1] = {}
+                        if value is None:
+                            obj_ref[1][field_name] = [None, None]
+                        else:
+                            resolved = self.solve_expression(value, make_true)
+                            obj_ref[1][field_name] = [resolved[0], resolved[1]] if resolved else [None, value]
+                        return
                     self.add_fact(stmt_object, value)
                     return
 
@@ -1234,20 +1405,32 @@ class Validator:
                 else:
                     pass
 
+
             elif stmt.type == 'typehint':
                 variable = stmt.objects[0]
                 type_name = stmt.objects[1]
+                # resolve o_type (unchanged)
                 if type_name in self.types:
                     o_type = type_name
                 else:
                     var_ref = self.scope_stack[-1].get(type_name)
                     if var_ref is not None and var_ref[0] == 'Type' and var_ref[1] in self.types:
                         o_type = var_ref[1]
-                    elif type_name in self.aliases:
-                        o_type = self.aliases[type_name]
                     else:
                         self._error(stmt.line, f"Undefined type '{type_name}'")
                         return
+                # route based on lvalue type
+                if isinstance(variable, Expression):
+                    # e's n, find the nested dict and apply typehint there
+                    obj, field = self._resolve_field_access(variable)
+                    if obj is not None:
+                        if field not in obj:
+                            obj[field] = [o_type, None]
+                        else:
+                            obj[field][0] = o_type
+                    return
+
+                # plain string variable name (existing logic unchanged)
                 var = self.scope_stack[-1].get(variable)
                 if var is None:
                     self.scope_stack[-1][variable] = [o_type, None]
@@ -1257,10 +1440,6 @@ class Validator:
                         cast_result = self._cast(var[1], old_type, o_type, stmt.line)
                         if cast_result is not None:
                             var[0], var[1] = cast_result
-                        elif not self.check_match(o_type, old_type, var[1], stmt.line):
-                            self._error(stmt.line,
-                                        f"Value '{var[1]}' of type '{old_type}' does not match declared type '{o_type}'")
-                            self.last_let_failed = True
                             return
                     var[0] = o_type
 
